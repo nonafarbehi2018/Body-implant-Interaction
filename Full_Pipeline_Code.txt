@@ -1,5 +1,5 @@
 ################################################################################
-# FINAL_ANALYSIS_9 -- COMPLETE PIPELINE (reference code)
+# COMPLETE PIPELINE (reference code)
 # Mouse skin biomaterial implant -- 10x Visium spatial transcriptomics
 # Samples: rod_wk2, rod_wk4, sphere_wk2
 #
