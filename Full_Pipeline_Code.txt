@@ -1,0 +1,2171 @@
+################################################################################
+# COMPLETE PIPELINE (reference code)
+# Mouse skin biomaterial implant -- 10x Visium spatial transcriptomics
+# Samples: rod_wk2, rod_wk4, sphere_wk2
+#
+# CONTENTS
+#   Stage 1   Setup, paths, palette, helpers, relabeling (rod_wk4 merge + renumber)
+#   Stage 2   SingleR heatmap / UMAP / spatial cluster plot per object
+#   Stage 3   CellChat rankNet + compareInteractions (implant-restricted, raw clusters)
+#   Stage 4   Implant-site Seurat subsets
+#   Stage 5   Implant-site CellChat family (identity-grouped, main + solo)
+#   Stage 6   Full CellChat plot suite (circle, diff, centrality, pathways, bubble, river/dot, similarity)
+#   Stage 7   Combined object + YAP-TAZ / TGFb / SPP1 / WNT module scoring
+#   Stage 8   Condition-level DE (implant-restricted and whole-object) + GO
+#   Stage 9   IMM-1 / FIB-1 trackplots (within-pool DE)
+#   Stage 10  Composition stacked-bar plots
+#   Stage 11  Pairwise all-cluster trackplots (top-2 DEGs per cluster)
+#   Stage 12  Aggregate UMAPs (merged + recomputed embedding)
+#   Stage 13  Marker spatial / violin / barplot analyses
+#   Stage 14  Implant-highlight spatial plots
+#   Stage 15  Intra-object IMM/FIB pairwise DE + GO
+#   Stage 16  Gene module scores (violin/boxplot + spatial)
+#   UPDATED BATCH (outputs go to Final_Analysis_9/Updated/)
+#     Part 0  Excel helper (README sheet documents every column)
+#     Part 1  Gene-module violins restricted to common cell identities
+#     Part 2  8-gene marker panel + gene-expression violins on common identities
+#     Part 3  Pair trackplots, module-score version (top-10 DEGs, p_val_adj <= 0.05) + DEG Excel
+#     Part 4  Module_Scores_Extended (IMM / FIB axes): violins + whole-object spatial
+#     Part 5  Axis dumbbell plots (median / mean, significant-only / all axes) + Excel
+#
+#
+# RUN ORDER
+#   Run top to bottom in ONE R session; later stages reuse objects created earlier
+#   (e.g. Stage 4 needs Stage 3's implant subsets; Stage 8 needs `combined` from Stage 7;
+#   Stage 15 needs run_go_bp from Stage 8; Updated Part 1 needs Stage 16's module
+#   functions; Updated Part 2 needs Stage 13's gene-comparison functions).
+#   Stages 2, 3, 5, 6, 8, 11, 12 and the Updated Parts 3-4 are the slow ones.
+#
+# INPUTS
+#   Final_Analysis_5/{rod_wk2,rod_wk4,sphere_wk2}_updated.rds  (Seurat objects with
+#   cell_type_label_updated and SingleR_label metadata)
+#
+#
+################################################################################
+## STAGE 1: setup, paths, palette, helpers, relabeling
+## rod_wk4: C13-EPI-2 merged into C6-EPI-2; C14-SMC & Adipocytes & PERI renumbered to C13
+################################################################################
+options(future.globals.maxSize = 6000 * 1024^2)
+library(Seurat); library(ggplot2); library(dplyr); library(CellChat)
+library(patchwork); library(pheatmap); library(ComplexHeatmap); library(circlize)
+library(grid); library(ggrepel); library(ggpubr); library(tidyr); library(tibble)
+library(clusterProfiler); library(org.Mm.eg.db); library(plotly); library(htmlwidgets)
+library(ggalluvial); library(scales); library(rstatix); library(RColorBrewer); library(openxlsx)
+
+new_save_path  <- "C:/Users/Rokny/Documents/Gaurav's_visium/Skin_Implant_returns/"
+final5_path    <- paste0(new_save_path, "Final_Analysis_5/")
+final9_path    <- paste0(new_save_path, "Final_Analysis_9/")
+cellchat9_path <- paste0(final9_path, "CellChat/")
+updated9_path  <- paste0(final9_path, "Updated/")
+
+png_ranknet9_path <- paste0(cellchat9_path, "plots/PNG/ranknet/"); pdf_ranknet9_path <- paste0(cellchat9_path, "plots/PDF/ranknet/")
+png_compare9_path <- paste0(cellchat9_path, "plots/PNG/compare/"); pdf_compare9_path <- paste0(cellchat9_path, "plots/PDF/compare/")
+png_circle9_path  <- paste0(cellchat9_path, "plots/PNG/circle/");  pdf_circle9_path  <- paste0(cellchat9_path, "plots/PDF/circle/")
+png_bubble9_path  <- paste0(cellchat9_path, "plots/PNG/bubble/");  pdf_bubble9_path  <- paste0(cellchat9_path, "plots/PDF/bubble/")
+png_contribution9_path <- paste0(cellchat9_path, "plots/PNG/contribution/"); pdf_contribution9_path <- paste0(cellchat9_path, "plots/PDF/contribution/")
+png_river9_path <- paste0(cellchat9_path, "plots/PNG/river/"); pdf_river9_path <- paste0(cellchat9_path, "plots/PDF/river/")
+png_dot9_path   <- paste0(cellchat9_path, "plots/PNG/dot/");   pdf_dot9_path   <- paste0(cellchat9_path, "plots/PDF/dot/")
+pathway_plots_path9    <- paste0(cellchat9_path, "pathway_plots/")
+pathway_specific_path9 <- paste0(cellchat9_path, "pathway_plots_specific/")
+similarity9_path <- paste0(cellchat9_path, "similarity/")
+solo_dir9        <- paste0(cellchat9_path, "solo_objects/")
+centrality9_path <- paste0(cellchat9_path, "centrality/")
+yap_dir9 <- paste0(final9_path, "YAP_analysis/")
+de_dir9  <- paste0(final9_path, "Condition_DE/")
+de_dir9_wholeobject <- paste0(final9_path, "Condition_DE_WholeObject/")
+trackplot_dir9 <- paste0(final9_path, "IMM_FIB_Trackplot/")
+wk2_path9 <- paste0(final9_path, "rod_wk2/"); wk4_path9 <- paste0(final9_path, "rod_wk4/"); sph_path9 <- paste0(final9_path, "sphere_wk2/")
+composition_dir9 <- paste0(final9_path, "Composition_Plots/")
+aggregate_umap_dir9 <- paste0(final9_path, "Aggregate_UMAP/")
+marker_spatial_violin_dir9 <- paste0(final9_path, "Marker_Spatial_Violin/")
+specific_genes_dir9 <- paste0(marker_spatial_violin_dir9, "Specific_Genes/")
+imm_implant_dir9 <- paste0(marker_spatial_violin_dir9, "IMM_Markers_Implant/")
+spp1_implant_dir9 <- paste0(marker_spatial_violin_dir9, "SPP1_Adhesion_Markers_Implant/")
+spp1_allcluster_dir9 <- paste0(marker_spatial_violin_dir9, "SPP1_Adhesion_Markers_AllClusters/")
+imm_fib_go_dir9 <- paste0(final9_path, "IMM_FIB_GO_Comparison/")
+gene_module_dir9 <- paste0(final9_path, "Gene_Module_Scores/")
+gene_module_spatial_dir9 <- paste0(final9_path, "Gene_Module_Spatial/")
+
+all_dirs9 <- c(final9_path, cellchat9_path, updated9_path,
+  png_ranknet9_path, pdf_ranknet9_path, png_compare9_path, pdf_compare9_path,
+  png_circle9_path, pdf_circle9_path, png_bubble9_path, pdf_bubble9_path,
+  png_contribution9_path, pdf_contribution9_path, png_river9_path, pdf_river9_path,
+  png_dot9_path, pdf_dot9_path, pathway_plots_path9, pathway_specific_path9,
+  similarity9_path, solo_dir9, centrality9_path,
+  yap_dir9, de_dir9, de_dir9_wholeobject, trackplot_dir9,
+  wk2_path9, wk4_path9, sph_path9, composition_dir9, aggregate_umap_dir9,
+  marker_spatial_violin_dir9, specific_genes_dir9, imm_implant_dir9,
+  spp1_implant_dir9, spp1_allcluster_dir9, imm_fib_go_dir9,
+  gene_module_dir9, gene_module_spatial_dir9)
+for (d in all_dirs9) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+# Master palette (F9): no "C13-EPI-2" (merged into "C6-EPI-2"); "C13-SMC & Adipocytes & PERI"
+# is the renumbered former C14 (rod_wk4)
+celltype_colors_master <- c(
+  "C1-IMM-1" = "#0067A5", "C0-IMM-1" = "#0067A5", "C2-IMM-1" = "#0067A5",
+  "C2-IMM-2" = "#F3C300", "C3-IMM-2" = "#F3C300",
+  "C8-IMM & FIB" = "#F38400",
+  "C3-FIB-1" = "#A1CAF1", "C5-FIB-1" = "#A1CAF1", "C7-FIB-2" = "#B3446C", "C4-FIB-2" = "#B3446C",
+  "C8-FIB-3" = "#C2B280", "C10-FIB & PERI" = "#848482", "C1-FIB & PERI" = "#848482",
+  "C9-EPI-2" = "#008856", "C6-EPI-2" = "#008856", "C0-EPI-2" = "#008856",
+  "C11-EPI-1" = "#E68FAC", "C6-EPI & FIB" = "#222222", "C9-EPI & FIB" = "#222222", "C8-EPI & FIB" = "#222222",
+  "C1-SKEL" = "#F99379", "C6-SKEL" = "#F99379", "C12-SKEL-2" = "#604E97",
+  "C5-SKEL & SMC" = "#800020", "C10-SKEL & SMC" = "#800020",
+  "C0-Adipocytes" = "#BE0032", "C2-Adipocytes" = "#BE0032",
+  "C5-(Adipocytes & FIB)-2" = "#DCD300", "C7-Adipocytes & FIB" = "#882D17",
+  "C4-PERI & IMM & FIB" = "#654522",
+  "C13-SMC & Adipocytes & PERI" = "#E25822", "C7-Adipocytes & PERI & FIB" = "#2B3D26"
+)
+
+color_to_identity <- function(colors_vec) {
+  identity_map <- character(0)
+  for (col in unique(colors_vec)) {
+    labels_for_color <- names(colors_vec)[colors_vec == col]
+    canonical <- sub("^C[0-9]+-", "", labels_for_color[1])
+    identity_map[labels_for_color] <- canonical
+  }
+  identity_map
+}
+label_to_identity <- color_to_identity(celltype_colors_master)
+identity_colors_master <- setNames(celltype_colors_master, unname(label_to_identity[names(celltype_colors_master)]))
+identity_colors_master <- identity_colors_master[!duplicated(names(identity_colors_master))]
+master_identity_order <- unique(unname(label_to_identity[names(celltype_colors_master)]))
+
+natural_cluster_order <- function(labels) {
+  nums <- as.numeric(sub("^C([0-9]+).*", "\\1", labels))
+  labels[order(nums)]
+}
+
+implant_site_clusters <- list(
+  rod_wk2    = c("C1-IMM-1", "C2-IMM-2", "C3-FIB-1", "C4-PERI & IMM & FIB", "C8-IMM & FIB", "C10-FIB & PERI"),
+  rod_wk4    = c("C0-IMM-1", "C3-FIB-1", "C7-Adipocytes & FIB", "C8-FIB-3"),
+  sphere_wk2 = c("C1-FIB & PERI", "C2-IMM-1", "C3-IMM-2", "C5-FIB-1", "C6-SKEL")
+)
+pathways_of_interest <- c("TGFb", "SPP1", "CXCL", "COLLAGEN", "TNF", "PLAU", "WNT")
+dataset_colors    <- c(rod_wk2 = "#7B2CBF", rod_wk4 = "#ADD8E6", sphere_wk2 = "#2E8B57")
+object_bar_colors <- dataset_colors
+rod_pt_size    <- 7
+sphere_pt_size <- 8
+
+# ---- Project-wide style helpers ----
+spatial_colors_100 <- colorRampPalette(rev(brewer.pal(11, "Spectral")))(100)   # Seurat's default spatial gradient
+cap_label <- function(x) { x <- gsub("_", " ", x); paste0(toupper(substr(x, 1, 1)), substr(x, 2, nchar(x))) }
+bold_axes <- function(size = 12) theme(axis.text.x = element_text(size = size, face = "bold"),
+                                       axis.text.y = element_text(size = size, face = "bold"))
+# Gene-label style: capital first letter, 1.5x the size the Final_Analysis_8 plot used, bold
+gene_font_scale <- 1.5
+fs       <- function(old_size) old_size * gene_font_scale
+cap_gene <- function(x) paste0(toupper(substr(x, 1, 1)), substr(x, 2, nchar(x)))
+
+save_plot_to <- function(plot_obj, filename, dest_png, dest_pdf, width = 8, height = 6, dpi = 300) {
+  png(paste0(dest_png, filename, ".png"), width = width * dpi, height = height * dpi, res = dpi, type = "cairo")
+  print(plot_obj); dev.off()
+  pdf(paste0(dest_pdf, filename, ".pdf"), width = width, height = height)
+  print(plot_obj); dev.off()
+}
+get_imm_receiver <- function(cellchat) {
+  idx <- which(grepl("IMM", levels(cellchat@idents)))
+  if (length(idx) < 2) {
+    fib_idx <- setdiff(which(grepl("FIB", levels(cellchat@idents))), idx)
+    idx <- c(idx, head(fib_idx, 2 - length(idx)))
+  }
+  if (length(idx) < 2) idx <- seq_len(min(2, length(levels(cellchat@idents))))
+  sort(idx)
+}
+build_cellchat <- function(seurat_obj, group_col = "cell_type_label_updated") {
+  cellchat <- createCellChat(object = seurat_obj, group.by = group_col, assay = "RNA")
+  cellchat@DB <- CellChatDB.use
+  cellchat <- subsetData(cellchat)
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  cellchat <- identifyOverExpressedInteractions(cellchat)
+  cellchat <- computeCommunProb(cellchat, raw.use = TRUE)
+  cellchat <- filterCommunication(cellchat, min.cells = 10)
+  cellchat <- computeCommunProbPathway(cellchat)
+  cellchat <- aggregateNet(cellchat)
+  cellchat
+}
+build_raw_centr_matrix <- function(cellchat, pathways, pattern) {
+  slot_names <- switch(pattern, outgoing = "outdeg", incoming = "indeg", all = c("outdeg", "indeg"))
+  cell_types <- levels(cellchat@idents)
+  mat <- matrix(0, nrow = length(pathways), ncol = length(cell_types), dimnames = list(pathways, cell_types))
+  for (pw in pathways) if (pw %in% names(cellchat@netP$centr)) for (sn in slot_names) {
+    v <- cellchat@netP$centr[[pw]][[sn]]; mat[pw, names(v)] <- mat[pw, names(v)] + v
+  }
+  mat
+}
+
+## ---- Load Final_Analysis_5 base objects ----
+rod_wk2    <- readRDS(paste0(final5_path, "rod_wk2_updated.rds"))
+rod_wk4_04 <- readRDS(paste0(final5_path, "rod_wk4_updated.rds"))
+sphere_wk2 <- readRDS(paste0(final5_path, "sphere_wk2_updated.rds"))
+
+## ---- Relabeling ----
+rename_map_v9 <- list(
+  sphere_wk2 = c("C1-PERI & FIB" = "C1-FIB & PERI", "C3-IMM-3" = "C3-IMM-2"),
+  rod_wk4    = c("C13-EPI-2" = "C6-EPI-2", "C14-SMC & Adipocytes & PERI" = "C13-SMC & Adipocytes & PERI")
+)
+relabel_object <- function(seurat_obj, map) {
+  lbl <- as.character(seurat_obj$cell_type_label_updated)
+  for (old in names(map)) lbl[lbl == old] <- map[[old]]
+  seurat_obj$cell_type_label_updated <- factor(lbl)
+  seurat_obj
+}
+
+# Safety checks BEFORE the relabel: the labels we are about to change must exist
+stopifnot(all(c("C6-EPI-2", "C13-EPI-2", "C14-SMC & Adipocytes & PERI") %in% as.character(rod_wk4_04$cell_type_label_updated)))
+cat("rod_wk4 clusters BEFORE relabel:\n"); print(table(rod_wk4_04$cell_type_label_updated))
+n_epi2_before  <- sum(as.character(rod_wk4_04$cell_type_label_updated) %in% c("C6-EPI-2", "C13-EPI-2"))
+n_smc_before   <- sum(as.character(rod_wk4_04$cell_type_label_updated) == "C14-SMC & Adipocytes & PERI")
+n_spots_before <- ncol(rod_wk4_04)
+
+sphere_wk2 <- relabel_object(sphere_wk2, rename_map_v9$sphere_wk2)
+rod_wk4_04 <- relabel_object(rod_wk4_04, rename_map_v9$rod_wk4)
+
+for (obj_name in c("rod_wk2", "rod_wk4_04", "sphere_wk2")) {
+  obj <- get(obj_name)
+  obj$cell_identity <- unname(label_to_identity[as.character(obj$cell_type_label_updated)])
+  assign(obj_name, obj)
+}
+
+# Safety checks AFTER the relabel
+lbl_wk4 <- as.character(rod_wk4_04$cell_type_label_updated)
+stopifnot(!"C13-EPI-2" %in% lbl_wk4,
+          !"C14-SMC & Adipocytes & PERI" %in% lbl_wk4,
+          sum(lbl_wk4 == "C6-EPI-2") == n_epi2_before,
+          sum(lbl_wk4 == "C13-SMC & Adipocytes & PERI") == n_smc_before,
+          ncol(rod_wk4_04) == n_spots_before,
+          all(rod_wk4_04$cell_identity[lbl_wk4 == "C6-EPI-2"] == "EPI-2"),
+          all(rod_wk4_04$cell_identity[lbl_wk4 == "C13-SMC & Adipocytes & PERI"] == "SMC & Adipocytes & PERI"),
+          !any(is.na(rod_wk2$cell_identity)), !any(is.na(rod_wk4_04$cell_identity)), !any(is.na(sphere_wk2$cell_identity)))
+cat("rod_wk4 clusters AFTER relabel:\n"); print(table(rod_wk4_04$cell_type_label_updated))
+cat("rod_wk4 cluster numbers now present (expect 0..13, no gaps):\n")
+print(sort(as.numeric(sub("^C([0-9]+)-.*", "\\1", unique(lbl_wk4)))))
+
+assign_implant_region <- function(seurat_obj, clusters_vec) ifelse(seurat_obj$cell_type_label_updated %in% clusters_vec, "Implant", "No Implant")
+rod_wk2$implant_region    <- assign_implant_region(rod_wk2, implant_site_clusters$rod_wk2)
+rod_wk4_04$implant_region <- assign_implant_region(rod_wk4_04, implant_site_clusters$rod_wk4)
+sphere_wk2$implant_region <- assign_implant_region(sphere_wk2, implant_site_clusters$sphere_wk2)
+
+saveRDS(rod_wk2,    paste0(final9_path, "rod_wk2_updated.rds"))
+saveRDS(rod_wk4_04, paste0(final9_path, "rod_wk4_updated.rds"))
+saveRDS(sphere_wk2, paste0(final9_path, "sphere_wk2_updated.rds"))
+
+cat("=== Stage 1 complete (Final_Analysis_9) ===\n")
+
+
+################################################################################
+## STAGE 2: SingleR heatmap / UMAP / spatial cluster plot per object
+################################################################################
+make_singler_heatmap <- function(obj, obj_name, label_col = "cell_type_label_updated", singler_col = "SingleR_label", out_path) {
+  ordered_levels <- natural_cluster_order(unique(as.character(obj@meta.data[[label_col]])))
+  tab <- table(Cluster = obj@meta.data[[label_col]], SingleR = obj@meta.data[[singler_col]])[ordered_levels, , drop = FALSE]
+  count_mat <- as.matrix(unclass(tab)); pct_mat <- (count_mat / rowSums(count_mat)) * 100
+  col_fun <- colorRamp2(c(0, 100), c("#cde2fb", "#104281"))
+  cell_fun <- function(j, i, x, y, width, height, fill) {
+    if (count_mat[i, j] > 0) {
+      lum <- 0.299*col2rgb(fill)[1] + 0.587*col2rgb(fill)[2] + 0.114*col2rgb(fill)[3]
+      grid.text(sprintf("%d\n(%.1f%%)", count_mat[i, j], pct_mat[i, j]), x, y,
+                gp = gpar(fontsize = 7, col = if (lum > 140) "black" else "white"))
+    }
+  }
+  ht <- Heatmap(pct_mat, name = "%", col = col_fun, cluster_rows = FALSE, cluster_columns = FALSE, cell_fun = cell_fun,
+                show_row_names = TRUE, row_names_side = "right",
+                column_title = paste0("SingleR % (updated labels): ", obj_name),
+                column_title_gp = gpar(fontsize = 13, fontface = "bold"),
+                row_names_gp = gpar(fontsize = 11, fontface = "bold"),
+                column_names_gp = gpar(fontsize = 10, fontface = "bold"),
+                heatmap_legend_param = list(title = "% of\ncluster"))
+  png(paste0(out_path, "singleR_heatmap_", obj_name, ".png"), width = 12*300, height = 8*300, res = 300, type = "cairo")
+  draw(ht); dev.off()
+}
+
+make_umap <- function(obj, obj_name, colors, out_path, pt_size = 1.7, label_size = 5.6) {
+  ordered_levels <- natural_cluster_order(unique(as.character(obj$cell_type_label_updated)))
+  obj$plot_label <- factor(obj$cell_type_label_updated, levels = ordered_levels)
+  umap_reduction <- grep("umap", Reductions(obj), ignore.case = TRUE, value = TRUE)[1]
+  umap_mat <- Embeddings(obj, umap_reduction)
+  umap_coords <- data.frame(x = umap_mat[, 1], y = umap_mat[, 2], plot_label = obj$plot_label)
+  label_centroids <- umap_coords %>% group_by(plot_label) %>% summarise(x = median(x), y = median(y), .groups = "drop")
+  p <- ggplot(umap_coords, aes(x = x, y = y, color = plot_label)) +
+    geom_point(size = pt_size, alpha = 0.85) +
+    scale_color_manual(values = colors, name = "Cluster") +
+    geom_text_repel(data = label_centroids, aes(x = x, y = y, label = plot_label),
+                     inherit.aes = FALSE, size = label_size, fontface = "bold",
+                     color = "black", bg.color = "white", bg.r = 0.15, max.overlaps = Inf) +
+    xlab("UMAP_1") + ylab("UMAP_2") +
+    ggtitle(paste0("UMAP: ", obj_name)) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", size = 13), legend.position = "right",
+          legend.text = element_text(size = 12, face = "bold"), legend.title = element_text(size = 12, face = "bold")) +
+    guides(color = guide_legend(override.aes = list(size = 6)))
+  ggsave(paste0(out_path, "UMAP_", obj_name, ".png"), p, width = 12, height = 8, dpi = 300)
+}
+
+# Seurat does not expose a fontface argument for SpatialDimPlot cluster labels, so set it on the label layers
+bold_label_layers <- function(p) {
+  for (i in seq_along(p$layers)) {
+    if (class(p$layers[[i]]$geom)[1] %in% c("GeomTextRepel", "GeomLabelRepel", "GeomText", "GeomLabel"))
+      p$layers[[i]]$aes_params$fontface <- "bold"
+  }
+  p
+}
+
+make_spatial <- function(obj, obj_name, colors, out_path, pt_size = 7, square = FALSE) {
+  ordered_levels <- natural_cluster_order(unique(as.character(obj$cell_type_label_updated)))
+  obj$plot_label <- factor(obj$cell_type_label_updated, levels = ordered_levels)
+  p <- SpatialDimPlot(obj, group.by = "plot_label", cols = colors, pt.size.factor = pt_size, label = TRUE, label.size = 4.2, repel = TRUE) +
+    ggtitle(paste0("Spatial clusters: ", obj_name)) +
+    theme(plot.title = element_text(face = "bold", size = 13), legend.position = "right",
+          legend.text = element_text(size = 12, face = "bold")) +
+    guides(fill = guide_legend(override.aes = list(size = 5)))
+  p <- bold_label_layers(p)
+  if (square) p <- p + theme(aspect.ratio = 1)
+  ggsave(paste0(out_path, "SpatialDimPlot_", obj_name, ".png"), p, width = 10, height = 8, dpi = 300)
+}
+
+for (spec in list(list(rod_wk2, "rod_wk2", wk2_path9, rod_pt_size, FALSE),
+                   list(rod_wk4_04, "rod_wk4", wk4_path9, rod_pt_size, FALSE),
+                   list(sphere_wk2, "sphere_wk2", sph_path9, sphere_pt_size, TRUE))) {
+  obj <- spec[[1]]; nm <- spec[[2]]; path <- spec[[3]]; ptsz <- spec[[4]]; sq <- spec[[5]]
+  colors_this <- celltype_colors_master[natural_cluster_order(unique(as.character(obj$cell_type_label_updated)))]
+  colors_this[is.na(colors_this)] <- "grey70"
+  make_singler_heatmap(obj, nm, out_path = path)
+  make_umap(obj, nm, colors_this, path)
+  make_spatial(obj, nm, colors_this, path, pt_size = ptsz, square = sq)
+}
+cat("=== Stage 2 complete (Final_Analysis_9) ===\n")
+
+
+################################################################################
+## STAGE 3: CellChat rankNet + compareInteractions
+## (implant-restricted, raw-cluster-grouped, rankNet split pairwise)
+################################################################################
+rod_wk2_implant_tmp    <- subset(rod_wk2,    subset = cell_type_label_updated %in% implant_site_clusters$rod_wk2)
+rod_wk4_implant_tmp    <- subset(rod_wk4_04, subset = cell_type_label_updated %in% implant_site_clusters$rod_wk4)
+sphere_wk2_implant_tmp <- subset(sphere_wk2, subset = cell_type_label_updated %in% implant_site_clusters$sphere_wk2)
+for (nm in c("rod_wk2_implant_tmp", "rod_wk4_implant_tmp", "sphere_wk2_implant_tmp")) {
+  obj <- get(nm); obj$cell_type_label_updated <- droplevels(factor(obj$cell_type_label_updated)); assign(nm, obj)
+  cat(nm, "clusters:", paste(levels(obj$cell_type_label_updated), collapse = " | "), "\n")
+}
+
+CellChatDB     <- CellChatDB.mouse
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+
+cellchat_rod_wk2_wt    <- build_cellchat(rod_wk2_implant_tmp)
+cellchat_rod_wk4_wt    <- build_cellchat(rod_wk4_implant_tmp)
+cellchat_sphere_wk2_wt <- build_cellchat(sphere_wk2_implant_tmp)
+
+group.new <- union(levels(cellchat_rod_wk2_wt@idents), union(levels(cellchat_rod_wk4_wt@idents), levels(cellchat_sphere_wk2_wt@idents)))
+cellchat_rod_wk2_wt    <- liftCellChat(cellchat_rod_wk2_wt,    group.new = group.new)
+cellchat_rod_wk4_wt    <- liftCellChat(cellchat_rod_wk4_wt,    group.new = group.new)
+cellchat_sphere_wk2_wt <- liftCellChat(cellchat_sphere_wk2_wt, group.new = group.new)
+object.list.wt     <- list(rod_wk2 = cellchat_rod_wk2_wt, rod_wk4 = cellchat_rod_wk4_wt, sphere_wk2 = cellchat_sphere_wk2_wt)
+cellchat_merged_wt <- mergeCellChat(object.list.wt, add.names = names(object.list.wt), cell.prefix = TRUE)
+
+saveRDS(cellchat_rod_wk2_wt,    paste0(cellchat9_path, "cellchat_rod_wk2_implant_rawcluster.rds"))
+saveRDS(cellchat_rod_wk4_wt,    paste0(cellchat9_path, "cellchat_rod_wk4_implant_rawcluster.rds"))
+saveRDS(cellchat_sphere_wk2_wt, paste0(cellchat9_path, "cellchat_sphere_wk2_implant_rawcluster.rds"))
+saveRDS(cellchat_merged_wt,     paste0(cellchat9_path, "cellchat_merged_implant_rawcluster.rds"))
+
+# Pathway labels: 1.5x the F8 size (8), bold; plot height grows with the number of pathways
+style_rankNet <- function(gg) gg + theme(axis.text.y = element_text(size = fs(8), face = "bold"),
+                                         axis.text.x = element_text(face = "bold"),
+                                         legend.text = element_text(face = "bold"))
+rank_height <- function(gg, min_h = 10, per_row = 0.3) {
+  n <- tryCatch(length(unique(gg$data$name)), error = function(e) 0)
+  max(min_h, n * per_row + 2)
+}
+
+gg1_rs <- style_rankNet(rankNet(cellchat_merged_wt, mode = "comparison", stacked = TRUE,  do.stat = TRUE, comparison = c(1, 3)))
+gg2_rs <- style_rankNet(rankNet(cellchat_merged_wt, mode = "comparison", stacked = FALSE, do.stat = TRUE, comparison = c(1, 3)))
+save_plot_to(gg1_rs, "rankNet_rod_wk2_vs_sphere_wk2_stacked",   png_ranknet9_path, pdf_ranknet9_path, 8,  rank_height(gg1_rs))
+save_plot_to(gg2_rs, "rankNet_rod_wk2_vs_sphere_wk2_unstacked", png_ranknet9_path, pdf_ranknet9_path, 10, rank_height(gg2_rs))
+
+gg1_rr <- style_rankNet(rankNet(cellchat_merged_wt, mode = "comparison", stacked = TRUE,  do.stat = TRUE, comparison = c(1, 2)))
+gg2_rr <- style_rankNet(rankNet(cellchat_merged_wt, mode = "comparison", stacked = FALSE, do.stat = TRUE, comparison = c(1, 2)))
+save_plot_to(gg1_rr, "rankNet_rod_wk2_vs_rod_wk4_stacked",   png_ranknet9_path, pdf_ranknet9_path, 8,  rank_height(gg1_rr))
+save_plot_to(gg2_rr, "rankNet_rod_wk2_vs_rod_wk4_unstacked", png_ranknet9_path, pdf_ranknet9_path, 10, rank_height(gg2_rr))
+
+gg3 <- compareInteractions(cellchat_merged_wt, show.legend = FALSE, group = seq_along(object.list.wt), measure = "count")  + bold_axes(12)
+gg4 <- compareInteractions(cellchat_merged_wt, show.legend = FALSE, group = seq_along(object.list.wt), measure = "weight") + bold_axes(12)
+save_plot_to(gg3, "compare_interactions_count",  png_compare9_path, pdf_compare9_path, 6, 6)
+save_plot_to(gg4, "compare_interactions_weight", png_compare9_path, pdf_compare9_path, 6, 6)
+cat("=== Stage 3 complete (Final_Analysis_9) ===\n")
+
+
+################################################################################
+## STAGE 4: Implant-site Seurat subsets (reuses Stage 3's subsets)
+################################################################################
+rod_wk2_implant    <- rod_wk2_implant_tmp
+rod_wk4_implant    <- rod_wk4_implant_tmp
+sphere_wk2_implant <- sphere_wk2_implant_tmp
+
+saveRDS(rod_wk2_implant,    paste0(final9_path, "rod_wk2_implant.rds"))
+saveRDS(rod_wk4_implant,    paste0(final9_path, "rod_wk4_implant.rds"))
+saveRDS(sphere_wk2_implant, paste0(final9_path, "sphere_wk2_implant.rds"))
+cat("=== Stage 4 complete ===\n")
+
+
+################################################################################
+## STAGE 5: Implant-site CellChat family (main + solo, identity-grouped)
+################################################################################
+cellchat_rod_wk2    <- build_cellchat(rod_wk2_implant,    group_col = "cell_identity")
+cellchat_rod_wk4    <- build_cellchat(rod_wk4_implant,    group_col = "cell_identity")
+cellchat_sphere_wk2 <- build_cellchat(sphere_wk2_implant, group_col = "cell_identity")
+
+all_identities <- union(levels(cellchat_rod_wk2@idents), union(levels(cellchat_rod_wk4@idents), levels(cellchat_sphere_wk2@idents)))
+group.new <- intersect(master_identity_order, all_identities)
+cellchat_rod_wk2    <- liftCellChat(cellchat_rod_wk2,    group.new = group.new)
+cellchat_rod_wk4    <- liftCellChat(cellchat_rod_wk4,    group.new = group.new)
+cellchat_sphere_wk2 <- liftCellChat(cellchat_sphere_wk2, group.new = group.new)
+object.list     <- list(rod_wk2 = cellchat_rod_wk2, rod_wk4 = cellchat_rod_wk4, sphere_wk2 = cellchat_sphere_wk2)
+cellchat_merged <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+
+for (nm in names(object.list)) {
+  object.list[[nm]] <- identifyCommunicationPatterns(object.list[[nm]], pattern = "outgoing", k = 3)
+  object.list[[nm]] <- identifyCommunicationPatterns(object.list[[nm]], pattern = "incoming", k = 3)
+}
+cellchat_rod_wk2 <- object.list$rod_wk2; cellchat_rod_wk4 <- object.list$rod_wk4; cellchat_sphere_wk2 <- object.list$sphere_wk2
+
+saveRDS(cellchat_rod_wk2,    paste0(cellchat9_path, "cellchat_rod_wk2.rds"))
+saveRDS(cellchat_rod_wk4,    paste0(cellchat9_path, "cellchat_rod_wk4.rds"))
+saveRDS(cellchat_sphere_wk2, paste0(cellchat9_path, "cellchat_sphere_wk2.rds"))
+saveRDS(cellchat_merged,     paste0(cellchat9_path, "cellchat_merged.rds"))
+
+cellchat_rod_wk2_solo    <- netAnalysis_computeCentrality(build_cellchat(rod_wk2_implant,    group_col = "cell_identity"))
+cellchat_rod_wk4_solo    <- netAnalysis_computeCentrality(build_cellchat(rod_wk4_implant,    group_col = "cell_identity"))
+cellchat_sphere_wk2_solo <- netAnalysis_computeCentrality(build_cellchat(sphere_wk2_implant, group_col = "cell_identity"))
+saveRDS(cellchat_rod_wk2_solo,    paste0(solo_dir9, "cellchat_rod_wk2_solo.rds"))
+saveRDS(cellchat_rod_wk4_solo,    paste0(solo_dir9, "cellchat_rod_wk4_solo.rds"))
+saveRDS(cellchat_sphere_wk2_solo, paste0(solo_dir9, "cellchat_sphere_wk2_solo.rds"))
+cat("=== Stage 5 complete ===\n")
+
+
+################################################################################
+## STAGE 6: Full implant-site CellChat plot suite
+################################################################################
+# ---- Style helpers for CellChat plots (theme-only, so no argument-name risk) ----
+style_cc <- function(gg, y_size = NULL) {
+  th <- if (is.null(y_size)) theme(axis.text = element_text(face = "bold")) else
+    theme(axis.text.x = element_text(face = "bold"), axis.text.y = element_text(size = y_size, face = "bold"))
+  tryCatch(gg & th, error = function(e) gg)
+}
+style_geneexpr <- function(gg) tryCatch(gg & theme(axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+                                                   axis.title.y = element_text(size = fs(8), face = "bold"),
+                                                   strip.text = element_text(size = fs(8), face = "bold")), error = function(e) gg)
+bold_heatmap_names <- function(ht, row_size) {
+  tryCatch({
+    ht@row_names_param$gp    <- gpar(fontsize = row_size, fontface = "bold")
+    ht@column_names_param$gp <- gpar(fontsize = 10, fontface = "bold")
+    ht
+  }, error = function(e) ht)
+}
+
+# 6a: Circle + pairwise diffInteraction (base graphics, labels as in F8)
+make_circle_plot <- function(cellchat, obj_name, out_png, out_pdf) {
+  groupSize <- as.numeric(table(cellchat@idents)); colors_this <- identity_colors_master[rownames(cellchat@net$count)]
+  draw_fn <- function() {
+    par(mfrow = c(1,2), mar = c(2,2,4,2), oma = c(0,0,3,0))
+    netVisual_circle(cellchat@net$count,  vertex.weight = groupSize, weight.scale = TRUE, label.edge = FALSE, color.use = colors_this, title.name = "Count (Number of Interactions)")
+    netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = TRUE, label.edge = FALSE, color.use = colors_this, title.name = "Weight (Interaction Strength)")
+    mtext(obj_name, outer = TRUE, cex = 1.6, font = 2, line = 0.5)
+  }
+  png(paste0(out_png, "circle_", obj_name, "_count_weight.png"), width = 14*300, height = 7.5*300, res = 300, type = "cairo"); draw_fn(); dev.off()
+  pdf(paste0(out_pdf, "circle_", obj_name, "_count_weight.pdf"), width = 14, height = 7.5); draw_fn(); dev.off()
+}
+for (o in list(list(cellchat_rod_wk2,"rod_wk2"), list(cellchat_rod_wk4,"rod_wk4"), list(cellchat_sphere_wk2,"sphere_wk2")))
+  make_circle_plot(o[[1]], o[[2]], png_circle9_path, pdf_circle9_path)
+
+make_diff_plot <- function(cc1, cc2, name1, name2, out_png, out_pdf) {
+  pair_merged <- mergeCellChat(list(cc1, cc2), add.names = c(name1, name2), cell.prefix = TRUE)
+  for (measure in c("count", "weight")) {
+    draw_fn <- function() {
+      par(mar = c(2,2,4,2), oma = c(0,0,3,0))
+      netVisual_diffInteraction(pair_merged, weight.scale = TRUE, measure = measure,
+                                 color.use = identity_colors_master[rownames(pair_merged@net[[1]]$count)],
+                                 title.name = paste0("Measure: ", ifelse(measure=="count","Count","Weight")))
+      mtext(paste0(name1, "  vs  ", name2), outer = TRUE, cex = 1.6, font = 2, line = 0.5)
+      legend("bottomleft", legend = c(paste("Stronger in", name2), paste("Stronger in", name1)), col = c("red","blue"), lwd = 3, bty = "n", cex = 0.8)
+    }
+    png(paste0(out_png, "diff_interaction_", measure, "_", name1, "_vs_", name2, ".png"), width = 8*300, height = 8.5*300, res = 300, type = "cairo"); draw_fn(); dev.off()
+    pdf(paste0(out_pdf, "diff_interaction_", measure, "_", name1, "_vs_", name2, ".pdf"), width = 8, height = 8.5); draw_fn(); dev.off()
+  }
+}
+make_diff_plot(cellchat_rod_wk2, cellchat_rod_wk4,    "rod_wk2", "rod_wk4",    png_compare9_path, pdf_compare9_path)
+make_diff_plot(cellchat_rod_wk2, cellchat_sphere_wk2, "rod_wk2", "sphere_wk2", png_compare9_path, pdf_compare9_path)
+make_diff_plot(cellchat_rod_wk4, cellchat_sphere_wk2, "rod_wk4", "sphere_wk2", png_compare9_path, pdf_compare9_path)
+
+# 6b: Centrality / signaling-role heatmaps (right-side "Strength" bar removed: not comparable across conditions)
+make_centrality_heatmap <- function(cc1, cc2, name1, name2, pattern, out_path) {
+  pathway.union <- union(cc1@netP$pathways, cc2@netP$pathways)
+  raw1 <- build_raw_centr_matrix(cc1, pathway.union, pattern)
+  raw2 <- build_raw_centr_matrix(cc2, pathway.union, pattern)
+  shared_top   <- max(max(colSums(raw1), colSums(raw2), na.rm = TRUE), 1)
+  shared_right <- max(max(rowSums(raw1), rowSums(raw2), na.rm = TRUE), 1)
+
+  body_h_cm <- max(8, 0.55 * length(pathway.union))     # taller body so larger pathway labels don't overlap
+  fig_h     <- body_h_cm / 2.54 + 3.5
+  ht1 <- netAnalysis_signalingRole_heatmap(cc1, pattern = pattern, signaling = pathway.union, title = name1, width = 5, height = body_h_cm,
+                                            color.heatmap = "OrRd", color.use = identity_colors_master[levels(cc1@idents)],
+                                            font.size = fs(8), ylim.top = c(0, shared_top), ylim.right = c(0, shared_right))
+  ht2 <- netAnalysis_signalingRole_heatmap(cc2, pattern = pattern, signaling = pathway.union, title = name2, width = 5, height = body_h_cm,
+                                            color.heatmap = "OrRd", color.use = identity_colors_master[levels(cc2@idents)],
+                                            font.size = fs(8), ylim.top = c(0, shared_top), ylim.right = c(0, shared_right))
+  ht1@right_annotation <- NULL; ht2@right_annotation <- NULL
+  ht1 <- bold_heatmap_names(ht1, fs(8)); ht2 <- bold_heatmap_names(ht2, fs(8))
+
+  fname_png <- paste0(out_path, pattern, "_signaling_role_heatmap_", name1, "_vs_", name2, ".png")
+  fname_pdf <- paste0(out_path, pattern, "_signaling_role_heatmap_", name1, "_vs_", name2, ".pdf")
+  png(fname_png, width = 13*300, height = fig_h*300, res = 300, type = "cairo"); draw(ht1 + ht2, ht_gap = unit(2, "cm")); dev.off()
+  pdf(fname_pdf, width = 13, height = fig_h); draw(ht1 + ht2, ht_gap = unit(2, "cm")); dev.off()
+
+  pathway_table <- data.frame(pathway = pathway.union, raw_sum_1 = round(rowSums(raw1), 3), raw_sum_2 = round(rowSums(raw2), 3))
+  names(pathway_table)[2:3] <- c(paste0("true_sum_", name1), paste0("true_sum_", name2))
+  cat("Saved:", fname_png, "\n"); print(pathway_table); cat("\n")
+}
+for (pat in c("outgoing", "incoming", "all")) {
+  make_centrality_heatmap(cellchat_rod_wk2_solo, cellchat_rod_wk4_solo,    "rod_wk2", "rod_wk4",    pat, centrality9_path)
+  make_centrality_heatmap(cellchat_rod_wk2_solo, cellchat_sphere_wk2_solo, "rod_wk2", "sphere_wk2", pat, centrality9_path)
+}
+
+# 6c: Pathway-specific plots
+make_pathway_plots <- function(cellchat, obj_name, pathway, obj_dir) {
+  if (!(pathway %in% cellchat@netP$pathways)) return(invisible(NULL))
+  png_dir <- paste0(obj_dir, "PNG/"); pdf_dir <- paste0(obj_dir, "PDF/")
+  dir.create(png_dir, recursive = TRUE, showWarnings = FALSE); dir.create(pdf_dir, recursive = TRUE, showWarnings = FALSE)
+  receiver <- get_imm_receiver(cellchat); colors_this <- identity_colors_master[levels(cellchat@idents)]
+  groupSize <- as.numeric(table(cellchat@idents))
+  tryCatch({
+    gg <- style_geneexpr(plotGeneExpression(cellchat, signaling = pathway, type = "violin"))
+    save_plot_to(gg, paste0("gene_expression_", pathway, "_", obj_name), png_dir, pdf_dir, 8, 8)
+  }, error = function(e) NULL)
+  tryCatch({
+    for (dev_spec in list(list(fn=png, path=paste0(png_dir,"hierarchy_",pathway,"_",obj_name,".png"), args=list(width=10*300,height=6*300,res=300,type="cairo")),
+                           list(fn=pdf, path=paste0(pdf_dir,"hierarchy_",pathway,"_",obj_name,".pdf"), args=list(width=10,height=6)))) {
+      do.call(dev_spec$fn, c(list(dev_spec$path), dev_spec$args)); par(mar = c(2,2,8,2))
+      netVisual_aggregate(cellchat, signaling = pathway, layout = "hierarchy", vertex.receiver = receiver, color.use = colors_this,
+                           vertex.weight = groupSize, vertex.weight.max = max(groupSize), vertex.size.max = 60)
+      dev.off()
+    }
+  }, error = function(e) graphics.off())
+  tryCatch({
+    n_lr <- tryCatch(length(unique(subsetCommunication(cellchat, signaling = pathway)$interaction_name)), error = function(e) 5)
+    gg2 <- style_cc(netAnalysis_contribution(cellchat, signaling = pathway), y_size = fs(10))   # L-R pair names (gene names)
+    save_plot_to(gg2, paste0("contribution_", pathway, "_", obj_name), png_contribution9_path, pdf_contribution9_path, 6, max(4, 0.5 * n_lr + 2))
+  }, error = function(e) NULL)
+}
+objects_named <- list(rod_wk2 = cellchat_rod_wk2_solo, rod_wk4 = cellchat_rod_wk4_solo, sphere_wk2 = cellchat_sphere_wk2_solo)
+for (obj_name in names(objects_named)) {
+  cc <- objects_named[[obj_name]]
+  for (pw in pathways_of_interest) make_pathway_plots(cc, obj_name, pw, paste0(pathway_specific_path9, obj_name, "/"))
+  for (pw in cc@netP$pathways)     make_pathway_plots(cc, obj_name, pw, paste0(pathway_plots_path9, obj_name, "/"))
+}
+
+# 6d: IMM/FIB bubble plots (significance-filtered)
+all_idents <- levels(cellchat_merged@idents$joint)
+imm_fib_broader <- all_idents[grepl("IMM|FIB", all_idents) & !grepl("EPI|PERI|SKEL|SMC|Adipocyte", all_idents)]
+idx2 <- match(imm_fib_broader, all_idents)
+
+make_sig_bubble <- function(comparison_idx, plot_name) {
+  p_raw <- netVisual_bubble(cellchat_merged, sources.use = idx2, targets.use = idx2, comparison = comparison_idx, angle.x = 45)
+  raw_data <- p_raw$data
+  sig_flag <- aggregate(pval ~ source.target, data = raw_data, FUN = function(x) any(x > 1))
+  keep_cols <- sig_flag$source.target[sig_flag$pval == TRUE]
+  filtered_data <- raw_data[raw_data$source.target %in% keep_cols, ]
+  filtered_data$pval <- factor(as.character(filtered_data$pval), levels = c("1","2","3"))
+  filtered_data_sig <- filtered_data[filtered_data$pval %in% c("2","3"), ]
+  if (nrow(filtered_data_sig) == 0) return(invisible(NULL))
+  col_lookup <- unique(filtered_data_sig[, c("source.target","group.names","dataset")])
+  col_lookup$dataset <- factor(col_lookup$dataset, levels = c("rod_wk2","rod_wk4","sphere_wk2"))
+  col_lookup <- col_lookup[order(col_lookup$group.names, col_lookup$dataset), ]
+  keep_cols_sig <- col_lookup$source.target; keep_rows_sig <- unique(filtered_data_sig$interaction_name_2)
+  p_sig <- ggplot(filtered_data_sig, aes(x = source.target, y = interaction_name_2)) +
+    geom_point(aes(color = prob, size = pval)) +
+    scale_x_discrete(limits = keep_cols_sig, drop = TRUE) + scale_y_discrete(limits = keep_rows_sig, drop = TRUE) +
+    scale_color_gradientn(colors = c("blue","yellow","red"), name = "Communication\nProb.") +
+    scale_size_manual(values = c("2"=4,"3"=6), labels = c("p < 0.05","p < 0.01"), name = "p-value") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 11, face = "bold"),
+          axis.text.y = element_text(size = fs(8.8), face = "bold"),     # L-R pairs (gene names)
+          axis.title = element_blank())
+  save_plot_to(p_sig, paste0("bubble_IMM_FIB_only_", plot_name, "_sig"), png_bubble9_path, pdf_bubble9_path,
+               max(14, 0.32 * length(keep_cols_sig) + 6), max(12, 0.3 * length(keep_rows_sig) + 4))
+}
+make_sig_bubble(c(1,2,3), "all_groups")
+make_sig_bubble(c(1,2), "rod_wk2_vs_rod_wk4"); make_sig_bubble(c(1,3), "rod_wk2_vs_sphere_wk2"); make_sig_bubble(c(2,3), "rod_wk4_vs_sphere_wk2")
+
+# 6e: River / dot plots (k=3 patterns)
+for (o in list(list(cellchat_rod_wk2,"rod_wk2"), list(cellchat_rod_wk4,"rod_wk4"), list(cellchat_sphere_wk2,"sphere_wk2"))) {
+  for (pattern in c("outgoing","incoming")) {
+    tryCatch({ save_plot_to(netAnalysis_river(o[[1]], pattern = pattern), paste0("river_", o[[2]], "_", pattern), png_river9_path, pdf_river9_path, 10, 8) }, error = function(e) NULL)
+    tryCatch({ save_plot_to(style_cc(netAnalysis_dot(o[[1]], pattern = pattern)), paste0("dot_", o[[2]], "_", pattern), png_dot9_path, pdf_dot9_path, 8, 6) }, error = function(e) NULL)
+  }
+}
+
+# 6f: Similarity / embedding plots (pathway labels 1.5x)
+for (sim_type in c("functional","structural")) {
+  cellchat_merged <- computeNetSimilarityPairwise(cellchat_merged, type = sim_type)
+  cellchat_merged <- netEmbedding(cellchat_merged, type = sim_type, umap.method = "uwot")
+  cellchat_merged <- netClustering(cellchat_merged, type = sim_type)
+  tryCatch({ save_plot_to(netVisual_embeddingPairwise(cellchat_merged, type = sim_type, label.size = fs(3.5)), paste0("embedding_pairwise_", sim_type), similarity9_path, similarity9_path, 10, 8) }, error=function(e) NULL)
+  tryCatch({ save_plot_to(netVisual_embeddingPairwiseZoomIn(cellchat_merged, type = sim_type, nCol = 3), paste0("embedding_pairwise_zoom_", sim_type), similarity9_path, similarity9_path, 12, 10) }, error=function(e) NULL)
+  tryCatch({ save_plot_to(style_cc(rankSimilarity(cellchat_merged, type = sim_type)), paste0("rank_similarity_", sim_type), similarity9_path, similarity9_path, 8, 8) }, error=function(e) NULL)
+}
+saveRDS(cellchat_merged, paste0(cellchat9_path, "cellchat_merged.rds"))
+cat("=== Stage 6 complete ===\n")
+
+
+################################################################################
+## STAGE 7: Combined object + YAP-TAZ module scoring
+## (implant-site restricted, FIB-1 identity excluded)
+################################################################################
+rod_wk2$dataset <- "rod_wk2"; rod_wk4_04$dataset <- "rod_wk4"; sphere_wk2$dataset <- "sphere_wk2"
+combined <- merge(rod_wk2, y = list(rod_wk4_04, sphere_wk2), add.cell.ids = c("rod_wk2","rod_wk4","sphere_wk2"))
+DefaultAssay(combined) <- "RNA"; combined <- JoinLayers(combined, assay = "RNA"); combined <- NormalizeData(combined, assay = "RNA", verbose = FALSE)
+combined$cell_identity <- unname(label_to_identity[as.character(combined$cell_type_label_updated)])
+saveRDS(combined, paste0(final9_path, "combined_all3_seurat.rds"))
+
+combined_implant <- subset(combined, subset = implant_region == "Implant" & cell_identity != "FIB-1")
+
+gene_sets <- list(
+  YAP_TAZ = c("Yap1","Wwtr1","Tead1","Tead4","Ctgf","Cyr61","Ankrd1","Amotl2","Tgfbi","Thbs1","Fstl1"),
+  TGFb_SMAD_YAP = c("Tgfb1","Tgfb2","Tgfbr1","Tgfbr2","Smad2","Smad3","Smad4","Serpine1","Tgfbi","Ctgf"),
+  SPP1_POSTN_FAK_YAP = c("Spp1","Postn","Itgav","Itgb1","Itgb3","Itga5","Ptk2","Pxn","Vcl","Tln1","Cyr61","Ctgf"),
+  WNT_YAP = c("Wnt5a","Wnt3a","Fzd1","Fzd7","Lrp5","Lrp6","Dvl1","Dvl2","Ctnnb1","Axin2","Yap1","Wwtr1")
+)
+gene_sets_filtered <- lapply(gene_sets, function(x) intersect(x, rownames(combined_implant)))
+combined_implant <- AddModuleScore(combined_implant, features = list(gene_sets_filtered$YAP_TAZ), name = "YAP_TAZ_score"); combined_implant$YAP_score <- combined_implant$YAP_TAZ_score1
+combined_implant <- AddModuleScore(combined_implant, features = list(gene_sets_filtered$TGFb_SMAD_YAP), name = "TGFb_SMAD_score"); combined_implant$TGFb_score <- combined_implant$TGFb_SMAD_score1
+combined_implant <- AddModuleScore(combined_implant, features = list(gene_sets_filtered$SPP1_POSTN_FAK_YAP), name = "SPP1_POSTN_FAK_score"); combined_implant$SPP1_score <- combined_implant$SPP1_POSTN_FAK_score1
+combined_implant <- AddModuleScore(combined_implant, features = list(gene_sets_filtered$WNT_YAP), name = "WNT_YAP_score"); combined_implant$WNT_score <- combined_implant$WNT_YAP_score1
+saveRDS(combined_implant, paste0(final9_path, "combined_all3_seurat_implant_noFIB1.rds"))
+
+score_labels <- c(YAP_score = "YAP-TAZ", TGFb_score = "TGF\u03b2-SMAD", SPP1_score = "SPP1/POSTN-FAK", WNT_score = "WNT-YAP")
+
+run_yap_comparison <- function(combined, conditions, out_dir) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  sub_obj <- subset(combined, subset = dataset %in% conditions)
+  sub_obj$condition <- factor(sub_obj$dataset, levels = conditions)
+  meta_df <- sub_obj@meta.data %>% rownames_to_column("cell")
+
+  plot_list <- list()
+  for (sc in names(score_labels)) if (sc %in% colnames(meta_df))
+    plot_list[[sc]] <- ggplot(meta_df, aes(x=condition, y=.data[[sc]], fill=condition)) +
+      geom_violin(trim=FALSE, alpha=0.6) + geom_boxplot(width=0.15, outlier.shape=NA, alpha=0.8) +
+      geom_jitter(width=0.08, size=0.35, alpha=0.25) + stat_compare_means(method="wilcox.test") +
+      theme_classic(base_size=13) + bold_axes(12) + labs(x=NULL, y=score_labels[[sc]], title=score_labels[[sc]])
+  ggsave(paste0(out_dir,"module_scores_violin.png"), wrap_plots(plot_list), width=12, height=8, dpi=300)
+
+  test_results <- bind_rows(lapply(names(score_labels), function(sc) if (sc %in% colnames(meta_df)) {
+    wt <- wilcox.test(meta_df[[sc]] ~ meta_df$condition); data.frame(score=score_labels[[sc]], W=unname(wt$statistic), p_value=wt$p.value)
+  }))
+  write.csv(test_results, paste0(out_dir,"wilcoxon_test_results.csv"), row.names=FALSE)
+
+  selected_genes <- intersect(c("Yap1","Wwtr1","Ctgf","Cyr61","Ankrd1","Tgfb1","Smad3","Serpine1","Spp1","Postn","Ptk2","Wnt5a","Axin2"), rownames(sub_obj))
+  gene_theme <- theme(axis.text.x = element_text(size = fs(11), face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))   # F8 gene labels ~11
+  ggsave(paste0(out_dir,"key_genes_dotplot_condition.png"), DotPlot(sub_obj, features=selected_genes, group.by="condition") + RotatedAxis() + gene_theme, width=12, height=6, dpi=300)
+  sub_obj$identity_condition <- paste(sub_obj$cell_identity, sub_obj$condition, sep="_")
+  ggsave(paste0(out_dir,"key_genes_dotplot_identity_condition.png"), DotPlot(sub_obj, features=selected_genes, group.by="identity_condition") + RotatedAxis() + gene_theme, width=18, height=8, dpi=300)
+
+  expr_df <- FetchData(sub_obj, vars=c(selected_genes,"identity_condition"), layer="data")
+  avg_expr_mat <- t(as.matrix(expr_df %>% group_by(identity_condition) %>% summarise(across(all_of(selected_genes), ~mean(.x,na.rm=TRUE))) %>% tibble::column_to_rownames("identity_condition")))
+  gene_sd <- apply(avg_expr_mat, 1, sd, na.rm=TRUE); avg_expr_mat <- avg_expr_mat[!is.na(gene_sd) & gene_sd>0, , drop=FALSE]
+  rownames(avg_expr_mat) <- cap_gene(rownames(avg_expr_mat))
+  mat_scaled <- t(scale(t(avg_expr_mat)))
+  col_fun <- colorRamp2(c(min(mat_scaled,na.rm=TRUE),0,max(mat_scaled,na.rm=TRUE)), c("#2166AC","white","#B2182B"))
+  ht <- Heatmap(mat_scaled, name="z-score", col=col_fun, column_names_rot=90,
+                row_names_gp=gpar(fontsize=fs(9), fontface="bold"), column_names_gp=gpar(fontsize=9, fontface="bold"))
+  png(paste0(out_dir,"average_expression_heatmap.png"), width=max(12,ncol(mat_scaled)*0.8)*300, height=9*300, res=300, type="cairo"); draw(ht); dev.off()
+
+  cor_summary <- meta_df %>% group_by(condition) %>% summarise(
+    cor_tgfb=cor(YAP_score,TGFb_score,method="spearman",use="complete.obs"),
+    cor_spp1=cor(YAP_score,SPP1_score,method="spearman",use="complete.obs"),
+    cor_wnt=cor(YAP_score,WNT_score,method="spearman",use="complete.obs"))
+  write.csv(cor_summary, paste0(out_dir,"correlation_summary.csv"), row.names=FALSE)
+
+  shared_identities <- intersect(unique(meta_df$cell_identity[meta_df$condition==conditions[1]]), unique(meta_df$cell_identity[meta_df$condition==conditions[2]]))
+  meta_shared <- meta_df %>% filter(cell_identity %in% shared_identities) %>% group_by(cell_identity, condition) %>% filter(n()>=20) %>% ungroup()
+  if (nrow(meta_shared) > 0) {
+    meta_long <- meta_shared %>% select(cell, condition, cell_identity, all_of(names(score_labels))) %>%
+      pivot_longer(cols=all_of(names(score_labels)), names_to="pathway", values_to="score")
+    meta_long$pathway <- recode(meta_long$pathway, !!!score_labels)
+    p <- ggplot(meta_long, aes(x=condition, y=score, fill=condition)) + geom_violin(trim=FALSE, alpha=0.7) +
+      geom_boxplot(width=0.15, outlier.shape=NA, alpha=0.9) + stat_compare_means(method="wilcox.test", size=2.5) +
+      facet_grid(pathway ~ cell_identity, scales="free_y") + theme_classic(base_size=12) +
+      theme(strip.text=element_text(size=10, face="bold"), axis.text.x=element_text(angle=45,hjust=1,face="bold"), legend.position="top")
+    ggsave(paste0(out_dir,"pathways_shared_identities_violin.png"), p, width=16, height=10, dpi=300)
+  }
+  write.csv(meta_df[,intersect(c("condition","dataset","cell_identity","cell_type_label_updated",names(score_labels)),colnames(meta_df))],
+            paste0(out_dir,"module_scores_metadata.csv"), row.names=FALSE)
+}
+run_yap_comparison(combined_implant, c("rod_wk2","sphere_wk2"), paste0(yap_dir9,"rod_wk2_vs_sphere_wk2_implant_noFIB1/"))
+run_yap_comparison(combined_implant, c("rod_wk2","rod_wk4"),    paste0(yap_dir9,"rod_wk2_vs_rod_wk4_implant_noFIB1/"))
+cat("=== Stage 7 complete ===\n")
+
+
+################################################################################
+## STAGE 8: Condition-level DE -- implant-restricted AND whole-object
+## (ranked by |avg_log2FC|; top-DEG dotplots split Up / Down).
+## GO tables hold only terms with p.adjust < 0.05 (no qvalue column).
+################################################################################
+go_cutoff <- 0.05
+run_go_bp <- function(sig_genes, comparison_name, out_dir) {
+  if (length(sig_genes) < 5) return(invisible(NULL))
+  ego <- tryCatch(enrichGO(gene=sig_genes, OrgDb=org.Mm.eg.db, keyType="SYMBOL", ont="BP", pAdjustMethod="BH", pvalueCutoff=0.05, qvalueCutoff=0.2), error=function(e) NULL)
+  if (is.null(ego)) return(invisible(NULL))
+  go_res <- ego@result[ego@result$p.adjust < go_cutoff, ]
+  go_res <- go_res[, setdiff(colnames(go_res), "qvalue"), drop = FALSE]
+  if (nrow(go_res) == 0) return(invisible(NULL))
+  write.csv(go_res, paste0(out_dir,"GO_BP_",comparison_name,".csv"), row.names=FALSE)
+  go_df <- go_res %>% arrange(p.adjust) %>% head(15)
+  go_df$GeneRatioNum <- sapply(go_df$GeneRatio, function(x) eval(parse(text = x)))
+  go_df$Description <- factor(go_df$Description, levels = rev(go_df$Description))
+  p_go <- ggplot(go_df, aes(x = GeneRatioNum, y = Description, size = Count, color = p.adjust)) +
+    geom_point() +
+    scale_color_gradient(low = "red", high = "blue", name = "p.adjust") +
+    scale_x_continuous(expand = expansion(mult = 0.3)) +
+    theme_bw(base_size = 11) +
+    labs(title = paste0("GO BP: ", comparison_name), x = "GeneRatio", y = NULL)
+  save_plot_to(p_go, paste0("GO_BP_dotplot_", comparison_name), out_dir, out_dir, width=9, height=8)
+}
+
+run_de_block <- function(obj, ident1, ident2, comparison_name, out_dir, min_pct=0.1, logfc_threshold=0.25) {
+  dir.create(out_dir, recursive=TRUE, showWarnings=FALSE)
+  markers <- tryCatch(FindMarkers(obj, group.by="dataset", ident.1=ident1, ident.2=ident2, min.pct=min_pct, logfc.threshold=logfc_threshold, assay="RNA"), error=function(e) NULL)
+  if (is.null(markers) || nrow(markers)==0) return(invisible(NULL))
+  markers <- markers %>% tibble::rownames_to_column("gene") %>% arrange(desc(abs(avg_log2FC)))
+  markers$sig <- "NS"; markers$sig[markers$p_val_adj<0.05 & markers$avg_log2FC>0.25] <- "Up"; markers$sig[markers$p_val_adj<0.05 & markers$avg_log2FC< -0.25] <- "Down"
+  write.csv(markers, paste0(out_dir,"DEG_",comparison_name,".csv"), row.names=FALSE)   # full table; 'sig' column marks Up/Down/NS
+
+  top_labels <- markers %>% filter(sig!="NS") %>% arrange(desc(abs(avg_log2FC))) %>% head(20)
+  p_volcano <- ggplot(markers, aes(x=avg_log2FC, y=-log10(p_val_adj+1e-300), color=sig)) + geom_point(alpha=0.6, size=1) +
+    scale_color_manual(values=c(Up="red",Down="blue",NS="grey70")) +
+    geom_text_repel(data=top_labels, aes(label=cap_gene(gene)), size=fs(3), fontface="bold", max.overlaps=30, color="black") +
+    theme_classic(base_size=13) + bold_axes(12) + labs(title=paste0("Volcano: ",comparison_name), x="log2FC", y="-log10(adj p-value)")
+  save_plot_to(p_volcano, paste0("volcano_", comparison_name), out_dir, out_dir, width=9, height=8)
+
+  top_genes_up   <- markers %>% filter(sig=="Up")   %>% arrange(desc(avg_log2FC)) %>% head(20) %>% pull(gene)
+  top_genes_down <- markers %>% filter(sig=="Down") %>% arrange(avg_log2FC)       %>% head(20) %>% pull(gene)
+  dot_theme <- theme(axis.text.x = element_text(size = fs(11), face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+  if (length(top_genes_up) > 0) {
+    p_dot_up <- DotPlot(obj, features=top_genes_up, group.by="dataset") + RotatedAxis() +
+      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0, name="Average\nExpression") +
+      ggtitle(paste0("Top upregulated DEGs (by log2FC): ", comparison_name)) + dot_theme
+    save_plot_to(p_dot_up, paste0("top_DEG_dotplot_UP_", comparison_name), out_dir, out_dir, width=max(12, 0.55*length(top_genes_up)+4), height=7)
+  }
+  if (length(top_genes_down) > 0) {
+    p_dot_down <- DotPlot(obj, features=top_genes_down, group.by="dataset") + RotatedAxis() +
+      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0, name="Average\nExpression") +
+      ggtitle(paste0("Top downregulated DEGs (by log2FC): ", comparison_name)) + dot_theme
+    save_plot_to(p_dot_down, paste0("top_DEG_dotplot_DOWN_", comparison_name), out_dir, out_dir, width=max(12, 0.55*length(top_genes_down)+4), height=7)
+  }
+  run_go_bp(markers %>% filter(sig!="NS") %>% pull(gene), comparison_name, out_dir)
+}
+
+run_condition_comparison <- function(combined, ident1, ident2, comparison_name, base_out_dir) {
+  sub_obj <- subset(combined, subset = dataset %in% c(ident1, ident2))
+  sub_obj <- subset(sub_obj, subset = implant_region == "Implant")
+  run_de_block(sub_obj, ident1, ident2, paste0(comparison_name,"_whole_tissue"), paste0(base_out_dir,"whole_tissue/"))
+  shared_identities <- intersect(unique(sub_obj$cell_identity[sub_obj$dataset==ident1]), unique(sub_obj$cell_identity[sub_obj$dataset==ident2]))
+  for (id in shared_identities) {
+    id_safe <- gsub("[^A-Za-z0-9]+", "_", id)
+    sub_ct <- subset(sub_obj, subset = cell_identity == id)
+    tab <- table(sub_ct$dataset)
+    if (length(tab) < 2 || any(tab < 20)) next
+    run_de_block(sub_ct, ident1, ident2, paste0(comparison_name,"_",id_safe), paste0(base_out_dir,"by_celltype/",id_safe,"/"))
+  }
+}
+run_condition_comparison_wholeobject <- function(combined, ident1, ident2, comparison_name, base_out_dir) {
+  sub_obj <- subset(combined, subset = dataset %in% c(ident1, ident2))
+  run_de_block(sub_obj, ident1, ident2, paste0(comparison_name, "_whole_tissue"), paste0(base_out_dir, "whole_tissue/"))
+  shared_identities <- intersect(unique(sub_obj$cell_identity[sub_obj$dataset == ident1]), unique(sub_obj$cell_identity[sub_obj$dataset == ident2]))
+  cat("Shared identities for", comparison_name, ":\n"); print(shared_identities)
+  for (id in shared_identities) {
+    id_safe <- gsub("[^A-Za-z0-9]+", "_", id)
+    sub_ct <- subset(sub_obj, subset = cell_identity == id)
+    tab <- table(sub_ct$dataset)
+    if (length(tab) < 2 || any(tab < 20)) { message("Skipping ", id, " -- insufficient cells on one side"); next }
+    run_de_block(sub_ct, ident1, ident2, paste0(comparison_name, "_", id_safe), paste0(base_out_dir, "by_celltype/", id_safe, "/"))
+  }
+}
+
+run_condition_comparison(combined, "rod_wk2", "sphere_wk2", "rod_wk2_vs_sphere_wk2", paste0(de_dir9,"rod_wk2_vs_sphere_wk2/"))
+run_condition_comparison(combined, "rod_wk2", "rod_wk4",    "rod_wk2_vs_rod_wk4",    paste0(de_dir9,"rod_wk2_vs_rod_wk4/"))
+run_condition_comparison_wholeobject(combined, "rod_wk2", "sphere_wk2", "rod_wk2_vs_sphere_wk2", paste0(de_dir9_wholeobject, "rod_wk2_vs_sphere_wk2/"))
+run_condition_comparison_wholeobject(combined, "rod_wk2", "rod_wk4",    "rod_wk2_vs_rod_wk4",    paste0(de_dir9_wholeobject, "rod_wk2_vs_rod_wk4/"))
+cat("=== Stage 8 complete ===\n")
+
+
+################################################################################
+## STAGE 9: IMM-1 / FIB-1 trackplots (within-pool DE; p_val_adj <= 0.05, top 10 by pct.1)
+## Gene names 27 pt bold-italic (2x the 13.5 pt F9 size), cluster labels 28 pt bold
+################################################################################
+make_trackplot <- function(cluster_info, out_filename, plot_title, custom_colors = NULL) {
+  cluster_order <- sapply(cluster_info, function(x) x$plot_label)
+  cluster_colors <- if (!is.null(custom_colors)) custom_colors[cluster_order] else
+    setNames(celltype_colors_master[sapply(cluster_info, function(x) x$cluster)], cluster_order)
+
+  subset_list <- list()
+  for (cl in cluster_info) { s <- subset(cl$obj, subset = cell_type_label_updated == cl$cluster); s$plot_label <- cl$plot_label; subset_list[[cl$plot_label]] <- s }
+  pool <- merge(subset_list[[1]], y = subset_list[-1])
+  DefaultAssay(pool) <- "RNA"; pool <- JoinLayers(pool, assay="RNA")
+  if (nrow(GetAssayData(pool, assay="RNA", layer="data"))==0) pool <- NormalizeData(pool, assay="RNA")
+  Idents(pool) <- factor(pool$plot_label, levels = cluster_order)
+
+  pool_markers <- FindAllMarkers(pool, only.pos=TRUE, min.pct=0.25, logfc.threshold=0.25)
+  combined_top10_annot <- pool_markers %>% filter(p_val_adj <= 0.05) %>% group_by(cluster) %>%
+    arrange(desc(pct.1), .by_group=TRUE) %>% slice_head(n=10) %>% ungroup()
+  gene_order <- combined_top10_annot %>% arrange(cluster, desc(pct.1)) %>% pull(gene) %>% unique()
+  gene_cluster_map <- combined_top10_annot %>% dplyr::select(gene, cluster) %>% distinct(gene, .keep_all=TRUE)
+
+  n_bins <- 10; bin_data_list <- list()
+  for (cl in cluster_info) {
+    DefaultAssay(cl$obj) <- "RNA"
+    cells <- colnames(cl$obj)[cl$obj@meta.data[["cell_type_label_updated"]]==cl$cluster]
+    sub_obj <- subset(cl$obj, cells=cells)
+    genes_present <- gene_order[gene_order %in% rownames(sub_obj)]; if (length(genes_present)==0) next
+    expr_mat <- as.matrix(GetAssayData(sub_obj, assay="RNA", layer="data")[genes_present, , drop=FALSE])
+    n_cells <- ncol(expr_mat); bin_size <- ceiling(n_cells/n_bins); bin_df_list <- list()
+    for (g in genes_present) { sorted_expr <- sort(expr_mat[g,])
+      for (b in 1:n_bins) { start_idx <- (b-1)*bin_size+1; end_idx <- min(b*bin_size, n_cells); if (start_idx>n_cells) break
+        bin_df_list[[paste(g,b)]] <- data.frame(gene=g, bin=b, bin_expr=mean(sorted_expr[start_idx:end_idx]), cluster_label=cl$plot_label, stringsAsFactors=FALSE) } }
+    if (length(bin_df_list)>0) bin_data_list[[cl$plot_label]] <- bind_rows(bin_df_list)
+  }
+  bin_df_all <- bind_rows(bin_data_list) %>% group_by(gene) %>% mutate(expr_scaled=(bin_expr-min(bin_expr))/(max(bin_expr)-min(bin_expr)+1e-10)) %>% ungroup() %>%
+    left_join(gene_cluster_map, by="gene")
+  bin_df_all$fill_color <- cluster_colors[bin_df_all$cluster]
+  bin_df_all$gene <- factor(as.character(bin_df_all$gene), levels=rev(gene_order))
+  bin_df_all$cluster_label <- factor(bin_df_all$cluster_label, levels=cluster_order)
+  bin_df_all <- bin_df_all %>% mutate(gene_num=as.numeric(gene), cluster_num=as.numeric(cluster_label),
+    x_pos=cluster_num-0.4+(bin-1)/(n_bins-1)*0.8, y_base=gene_num, y_top=gene_num+expr_scaled*0.85)
+
+  n_total_genes <- length(gene_order)
+  gene_groups <- combined_top10_annot %>% arrange(cluster, desc(pct.1)) %>% distinct(gene, .keep_all=TRUE) %>%
+    group_by(cluster) %>% summarise(n_genes=n(), .groups="drop") %>%
+    mutate(end_pos=cumsum(n_genes), start_pos=end_pos-n_genes+1, y_start=n_total_genes-end_pos+0.5, y_end=n_total_genes-start_pos+1.5,
+           y_mid=(y_start+y_end)/2, fill_color=cluster_colors[cluster], short_label=cap_label(as.character(cluster)))
+  y_colors_final <- cluster_colors[gene_cluster_map$cluster[match(levels(bin_df_all$gene), gene_cluster_map$gene)]]
+  x_ann_start <- length(cluster_order)+0.6; x_ann_end <- length(cluster_order)+1.2
+
+  gene_size <- fs(9) * 2          # 27 pt
+  xlab_size <- 14 * 2             # 28 pt
+  p <- ggplot(bin_df_all) +
+    geom_ribbon(aes(x=x_pos, ymin=y_base, ymax=y_top, fill=fill_color, group=interaction(gene,cluster_label)), alpha=0.85) +
+    scale_fill_identity() +
+    geom_segment(data=bin_df_all %>% distinct(gene,gene_num,cluster_num) %>% mutate(x_start=cluster_num-0.45, x_end=cluster_num+0.45),
+                 aes(x=x_start, xend=x_end, y=gene_num, yend=gene_num), color="grey70", linewidth=0.3) +
+    geom_rect(data=gene_groups, aes(xmin=x_ann_start, xmax=x_ann_end, ymin=y_start, ymax=y_end, fill=fill_color), alpha=0.85, inherit.aes=FALSE) +
+    geom_text(data=gene_groups, aes(x=(x_ann_start+x_ann_end)/2, y=y_mid, label=short_label), size=4.5, fontface="bold", color="white", inherit.aes=FALSE) +
+    geom_hline(data=gene_groups %>% filter(y_start>0.5), aes(yintercept=y_start-0.5), color="white", linewidth=0.8, inherit.aes=FALSE) +
+    scale_x_continuous(breaks=1:length(cluster_order), labels=cap_label(cluster_order), expand=c(0.02,0.02), limits=c(0.5,x_ann_end+0.1)) +
+    scale_y_continuous(breaks=1:n_total_genes, labels=cap_gene(levels(bin_df_all$gene)), expand=c(0.01,0.5)) +
+    theme_bw(base_size=12) +
+    theme(axis.text.x=element_text(angle=45,hjust=1,size=xlab_size,face="bold"),
+          axis.text.y=element_text(size=gene_size,face="bold.italic",color=y_colors_final),
+          axis.title.x=element_blank(), axis.title.y=element_text(size=18,face="bold"),
+          plot.title=element_text(size=24,face="bold"), plot.subtitle=element_text(size=16),
+          panel.grid=element_blank(), legend.position="none") +
+    ylab("Average gene expression per cluster") + ggtitle(plot_title, subtitle="Right panel = source cluster")
+
+  png(paste0(trackplot_dir9, out_filename), width=3400, height=max(6000, n_total_genes*210+1800), res=150); print(p); dev.off()
+}
+
+imm1_cluster_info <- list(list(obj=rod_wk2_implant,cluster="C1-IMM-1",plot_label="rod_wk2 C1-IMM-1"),
+                           list(obj=rod_wk4_implant,cluster="C0-IMM-1",plot_label="rod_wk4 C0-IMM-1"),
+                           list(obj=sphere_wk2_implant,cluster="C2-IMM-1",plot_label="sphere_wk2 C2-IMM-1"))
+fib1_cluster_info <- list(list(obj=rod_wk2_implant,cluster="C3-FIB-1",plot_label="rod_wk2 C3-FIB-1"),
+                           list(obj=rod_wk4_implant,cluster="C3-FIB-1",plot_label="rod_wk4 C3-FIB-1"),
+                           list(obj=sphere_wk2_implant,cluster="C5-FIB-1",plot_label="sphere_wk2 C5-FIB-1"))
+make_trackplot(imm1_cluster_info, "IMM1_trackplot.png", "Top 10 DE genes: IMM-1 across rod_wk2 / rod_wk4 / sphere_wk2",
+               custom_colors = setNames(dataset_colors[c("rod_wk2","rod_wk4","sphere_wk2")], sapply(imm1_cluster_info, function(x) x$plot_label)))
+make_trackplot(fib1_cluster_info, "FIB1_trackplot.png", "Top 10 DE genes: FIB-1 across rod_wk2 / rod_wk4 / sphere_wk2",
+               custom_colors = setNames(dataset_colors[c("rod_wk2","rod_wk4","sphere_wk2")], sapply(fib1_cluster_info, function(x) x$plot_label)))
+cat("=== Stage 9 complete ===\n")
+
+
+################################################################################
+## STAGE 10: Composition stacked-bar plots (whole-tissue, cell_identity)
+################################################################################
+make_composition_plot <- function(combined, conditions, out_dir, plot_name) {
+  sub_df <- combined@meta.data %>% filter(dataset %in% conditions) %>% mutate(dataset = factor(dataset, levels = conditions))
+  ids_by_condition <- lapply(conditions, function(cond) unique(sub_df$cell_identity[sub_df$dataset == cond]))
+  shared_ids <- Reduce(intersect, ids_by_condition)
+  unique_ids <- setdiff(unique(sub_df$cell_identity), shared_ids)
+  identity_levels <- c(intersect(master_identity_order, shared_ids), intersect(master_identity_order, unique_ids))
+  sub_df$cell_identity <- factor(sub_df$cell_identity, levels = identity_levels)
+
+  p <- ggplot(sub_df, aes(x = dataset, fill = cell_identity)) +
+    geom_bar(position = "fill", width = 0.7, color = "white", linewidth = 0.2) +
+    scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
+    scale_fill_manual(values = identity_colors_master[identity_levels], name = "Cell identity") +
+    theme_classic(base_size = 13) +
+    theme(axis.title.x = element_blank(), axis.text.x = element_text(size = 12, face = "bold"), axis.text.y = element_text(face = "bold"),
+          legend.key.size = unit(0.45, "cm"), legend.text = element_text(size = 11, face = "bold"), legend.title = element_text(face = "bold")) +
+    ylab("Proportion of spots") +
+    ggtitle(paste0("Cell-type composition: ", paste(conditions, collapse = " vs ")))
+  save_plot_to(p, plot_name, out_dir, out_dir, width = 6.5, height = 7)
+}
+make_composition_plot(combined, c("rod_wk2", "sphere_wk2"), composition_dir9, "composition_rod_wk2_vs_sphere_wk2")
+make_composition_plot(combined, c("rod_wk2", "rod_wk4"),    composition_dir9, "composition_rod_wk2_vs_rod_wk4")
+cat("=== Stage 10 complete ===\n")
+
+
+################################################################################
+## STAGE 11: Pairwise all-cluster trackplots
+## Top-2 DEG per cluster (p_val_adj <= 0.05, ranked by avg_log2FC); same-identity clusters adjacent
+## Gene names 27 pt bold-italic, cluster labels 24 pt bold
+################################################################################
+compute_top_markers_per_object <- function(obj, n_top = 2) {
+  obj_de <- obj
+  DefaultAssay(obj_de) <- "RNA"
+  if (nrow(GetAssayData(obj_de, assay = "RNA", layer = "data")) == 0) obj_de <- NormalizeData(obj_de, assay = "RNA")
+  Idents(obj_de) <- obj_de$cell_type_label_updated
+  markers <- FindAllMarkers(obj_de, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+  markers %>% filter(p_val_adj <= 0.05) %>% group_by(cluster) %>% arrange(desc(avg_log2FC), .by_group = TRUE) %>% slice_head(n = n_top) %>% ungroup()
+}
+top_markers_by_obj <- list(
+  rod_wk2    = compute_top_markers_per_object(rod_wk2),
+  rod_wk4    = compute_top_markers_per_object(rod_wk4_04),
+  sphere_wk2 = compute_top_markers_per_object(sphere_wk2)
+)
+
+make_pair_trackplot_v2 <- function(obj1, obj1_name, obj2, obj2_name, top_markers_by_obj, out_filename, plot_title) {
+  clusters1 <- natural_cluster_order(unique(as.character(obj1$cell_type_label_updated)))
+  clusters2 <- natural_cluster_order(unique(as.character(obj2$cell_type_label_updated)))
+  clusters_df <- bind_rows(
+    data.frame(obj_name = obj1_name, cluster = clusters1, identity = unname(label_to_identity[clusters1]), stringsAsFactors = FALSE),
+    data.frame(obj_name = obj2_name, cluster = clusters2, identity = unname(label_to_identity[clusters2]), stringsAsFactors = FALSE))
+  clusters_df$identity <- factor(clusters_df$identity, levels = intersect(master_identity_order, unique(clusters_df$identity)))
+  clusters_df$obj_name <- factor(clusters_df$obj_name, levels = c(obj1_name, obj2_name))
+  clusters_df <- clusters_df %>% arrange(identity, obj_name)
+  clusters_df$cluster_num <- seq_len(nrow(clusters_df))
+  clusters_df$stripe_color <- dataset_colors[as.character(clusters_df$obj_name)]
+
+  obj_lookup <- setNames(list(obj1, obj2), c(obj1_name, obj2_name))
+  cluster_info <- lapply(seq_len(nrow(clusters_df)), function(i) {
+    list(obj = obj_lookup[[as.character(clusters_df$obj_name[i])]], cluster = clusters_df$cluster[i],
+         plot_label = paste(clusters_df$obj_name[i], clusters_df$cluster[i]))
+  })
+  cluster_order <- sapply(cluster_info, function(x) x$plot_label)
+  raw_cluster_lookup <- setNames(clusters_df$cluster, cluster_order)
+  cluster_colors <- celltype_colors_master[raw_cluster_lookup]
+  names(cluster_colors) <- cluster_order
+
+  top_markers_annot <- bind_rows(
+    top_markers_by_obj[[obj1_name]] %>% filter(cluster %in% clusters1) %>% mutate(plot_label = paste(obj1_name, cluster)),
+    top_markers_by_obj[[obj2_name]] %>% filter(cluster %in% clusters2) %>% mutate(plot_label = paste(obj2_name, cluster)))
+  top_markers_annot$plot_label <- factor(top_markers_annot$plot_label, levels = cluster_order)
+  top_markers_annot <- top_markers_annot %>% arrange(plot_label, desc(avg_log2FC))
+
+  gene_position_df <- top_markers_annot %>% distinct(gene, .keep_all = TRUE) %>%
+    transmute(gene, owning_cluster = plot_label) %>% mutate(row_num = row_number())
+  gene_order <- gene_position_df$gene
+  n_total_genes <- nrow(gene_position_df)
+  gene_row_lookup     <- setNames(gene_position_df$row_num, gene_position_df$gene)
+  gene_cluster_lookup <- setNames(as.character(gene_position_df$owning_cluster), gene_position_df$gene)
+  gene_labels_ordered <- rev(gene_position_df$gene)
+
+  n_bins <- 10; bin_data_list <- list()
+  for (cl in cluster_info) {
+    DefaultAssay(cl$obj) <- "RNA"
+    cells <- colnames(cl$obj)[cl$obj@meta.data[["cell_type_label_updated"]] == cl$cluster]
+    sub_obj <- subset(cl$obj, cells = cells)
+    genes_present <- gene_order[gene_order %in% rownames(sub_obj)]; if (length(genes_present) == 0) next
+    expr_mat <- as.matrix(GetAssayData(sub_obj, assay = "RNA", layer = "data")[genes_present, , drop = FALSE])
+    n_cells <- ncol(expr_mat); bin_size <- ceiling(n_cells / n_bins); bin_df_list <- list()
+    for (g in genes_present) { sorted_expr <- sort(expr_mat[g, ])
+      for (b in 1:n_bins) { start_idx <- (b - 1) * bin_size + 1; end_idx <- min(b * bin_size, n_cells); if (start_idx > n_cells) break
+        bin_df_list[[paste(g, b)]] <- data.frame(gene = g, bin = b, bin_expr = mean(sorted_expr[start_idx:end_idx]), cluster_label = cl$plot_label, stringsAsFactors = FALSE) } }
+    if (length(bin_df_list) > 0) bin_data_list[[cl$plot_label]] <- bind_rows(bin_df_list)
+  }
+  bin_df_all <- bind_rows(bin_data_list) %>% group_by(gene) %>% mutate(expr_scaled = (bin_expr - min(bin_expr)) / (max(bin_expr) - min(bin_expr) + 1e-10)) %>% ungroup()
+  bin_df_all$fill_color <- cluster_colors[gene_cluster_lookup[bin_df_all$gene]]
+  bin_df_all$row_num  <- gene_row_lookup[bin_df_all$gene]
+  bin_df_all$gene_num <- n_total_genes - bin_df_all$row_num + 1
+  bin_df_all$cluster_label <- factor(bin_df_all$cluster_label, levels = cluster_order)
+  bin_df_all <- bin_df_all %>% mutate(cluster_num = as.numeric(cluster_label),
+    x_pos = cluster_num - 0.4 + (bin - 1) / (n_bins - 1) * 0.8, y_base = gene_num, y_top = gene_num + expr_scaled * 0.85)
+
+  gene_groups <- gene_position_df %>% group_by(owning_cluster) %>%
+    summarise(min_row = min(row_num), max_row = max(row_num), .groups = "drop") %>% rename(cluster = owning_cluster) %>%
+    mutate(cluster = factor(as.character(cluster), levels = cluster_order),
+           y_end = (n_total_genes - min_row + 1) + 0.5, y_start = (n_total_genes - max_row + 1) - 0.5,
+           y_mid = (y_start + y_end) / 2, fill_color = cluster_colors[as.character(cluster)], short_label = cap_label(as.character(cluster))) %>%
+    arrange(cluster)
+  y_colors_final <- cluster_colors[gene_cluster_lookup[gene_labels_ordered]]
+  x_ann_start <- length(cluster_order) + 0.6; x_ann_end <- length(cluster_order) + 1.2
+
+  gene_size <- fs(9) * 2          # 27 pt
+  xlab_size <- 12 * 2             # 24 pt
+  p <- ggplot(bin_df_all) +
+    geom_rect(data = clusters_df, aes(xmin = cluster_num - 0.48, xmax = cluster_num + 0.48, ymin = 0.5, ymax = n_total_genes + 0.5, fill = stripe_color), alpha = 0.22, inherit.aes = FALSE) +
+    geom_ribbon(aes(x = x_pos, ymin = y_base, ymax = y_top, fill = fill_color, group = interaction(gene, cluster_label)), alpha = 0.9) +
+    scale_fill_identity() +
+    geom_segment(data = bin_df_all %>% distinct(gene, gene_num, cluster_num) %>% mutate(x_start = cluster_num - 0.45, x_end = cluster_num + 0.45),
+                 aes(x = x_start, xend = x_end, y = gene_num, yend = gene_num), color = "grey70", linewidth = 0.3) +
+    geom_rect(data = gene_groups, aes(xmin = x_ann_start, xmax = x_ann_end, ymin = y_start, ymax = y_end, fill = fill_color), alpha = 0.85, inherit.aes = FALSE) +
+    geom_text(data = gene_groups, aes(x = (x_ann_start + x_ann_end) / 2, y = y_mid, label = short_label), size = 2.6, fontface = "bold", color = "white", inherit.aes = FALSE, angle = 60) +
+    geom_hline(data = gene_groups %>% filter(y_start > 0.5), aes(yintercept = y_start + 0.5), color = "white", linewidth = 0.8, inherit.aes = FALSE) +
+    annotate("text", x = 1, y = n_total_genes + 1.8, label = paste0("\u25A0 ", cap_label(obj1_name)), color = dataset_colors[obj1_name], fontface = "bold", size = 6, hjust = 0) +
+    annotate("text", x = 1, y = n_total_genes + 1.2, label = paste0("\u25A0 ", cap_label(obj2_name)), color = dataset_colors[obj2_name], fontface = "bold", size = 6, hjust = 0) +
+    scale_x_continuous(breaks = 1:length(cluster_order), labels = cap_label(cluster_order), expand = c(0.02, 0.02), limits = c(0.5, x_ann_end + 0.1)) +
+    scale_y_continuous(breaks = 1:n_total_genes, labels = cap_gene(gene_labels_ordered), expand = expansion(mult = c(0.01, 0.08))) +
+    theme_bw(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = xlab_size, face = "bold"),
+          axis.text.y = element_text(size = gene_size, face = "bold.italic", color = y_colors_final),
+          axis.title.x = element_blank(), axis.title.y = element_text(size = 18, face = "bold"),
+          plot.title = element_text(size = 24, face = "bold"), plot.subtitle = element_text(size = 16),
+          panel.grid = element_blank(), legend.position = "none") +
+    ylab("Average gene expression per cluster") + ggtitle(plot_title, subtitle = "Background stripe color = source object (see key, top-left)")
+
+  out_width  <- max(3600, length(cluster_order) * 135 + 900)
+  out_height <- max(4000, n_total_genes * 110 + 1500)
+  png(paste0(trackplot_dir9, out_filename), width = out_width, height = out_height, res = 150); print(p); dev.off()
+}
+make_pair_trackplot_v2(rod_wk2, "rod_wk2", sphere_wk2, "sphere_wk2", top_markers_by_obj,
+                        "pair_trackplot_rod_wk2_vs_sphere_wk2_top2_objcolor.png", "Top 2 DEGs per cluster (avg_log2FC): rod_wk2 vs sphere_wk2")
+make_pair_trackplot_v2(rod_wk2, "rod_wk2", rod_wk4_04, "rod_wk4", top_markers_by_obj,
+                        "pair_trackplot_rod_wk2_vs_rod_wk4_top2_objcolor.png", "Top 2 DEGs per cluster (avg_log2FC): rod_wk2 vs rod_wk4")
+cat("=== Stage 11 complete ===\n")
+
+
+################################################################################
+## STAGE 12: Aggregate UMAPs (merge + recompute shared embedding)
+################################################################################
+rod_pair <- merge(rod_wk2, y = rod_wk4_04, add.cell.ids = c("rod_wk2", "rod_wk4"))
+DefaultAssay(rod_pair) <- "RNA"
+rod_pair <- JoinLayers(rod_pair, assay = "RNA")
+rod_pair <- NormalizeData(rod_pair, assay = "RNA", verbose = FALSE)
+rod_pair <- FindVariableFeatures(rod_pair, verbose = FALSE)
+rod_pair <- ScaleData(rod_pair, verbose = FALSE)
+rod_pair <- RunPCA(rod_pair, verbose = FALSE)
+rod_pair <- RunUMAP(rod_pair, dims = 1:30, verbose = FALSE)
+
+rod_pair$obj_shape_label <- ifelse(rod_pair$dataset == "rod_wk2", "wk2", "wk4")
+rod_pair$plot_label <- paste0(as.character(rod_pair$cell_type_label_updated), " (", rod_pair$obj_shape_label, ")")
+label_levels <- unique(rod_pair$plot_label)
+raw_label_for_level <- sub(" \\((wk2|wk4)\\)$", "", label_levels)
+label_colors <- celltype_colors_master[raw_label_for_level]; names(label_colors) <- label_levels
+label_df <- data.frame(plot_label = label_levels, raw_label = raw_label_for_level, stringsAsFactors = FALSE)
+label_df$num <- as.numeric(sub("^C([0-9]+).*", "\\1", label_df$raw_label))
+label_df$obj_suffix <- ifelse(grepl("wk2\\)$", label_df$plot_label), "wk2", "wk4")
+label_df <- label_df[order(label_df$obj_suffix, label_df$num), ]
+label_levels_ordered <- label_df$plot_label
+rod_pair$plot_label <- factor(rod_pair$plot_label, levels = label_levels_ordered)
+
+umap_mat <- Embeddings(rod_pair, "umap")
+umap_coords <- data.frame(x = umap_mat[, 1], y = umap_mat[, 2], plot_label = rod_pair$plot_label, obj_shape_label = rod_pair$obj_shape_label)
+label_centroids <- umap_coords %>% group_by(plot_label) %>% summarise(x = median(x), y = median(y), .groups = "drop")
+
+p1 <- ggplot(umap_coords, aes(x = x, y = y, color = plot_label, shape = obj_shape_label)) +
+  geom_point(size = 1.8, alpha = 0.85) +
+  scale_color_manual(values = label_colors[label_levels_ordered], name = "Cluster (object)") +
+  scale_shape_manual(values = c(wk2 = 16, wk4 = 17), name = "Object") +
+  geom_text_repel(data = label_centroids, aes(x = x, y = y, label = plot_label), inherit.aes = FALSE, size = 4.8, fontface = "bold",
+                   color = "black", bg.color = "white", bg.r = 0.15, max.overlaps = Inf) +
+  xlab("UMAP_1") + ylab("UMAP_2") +
+  ggtitle("Aggregate UMAP: rod_wk2 vs rod_wk4 (whole-tissue, merged + recomputed)") +
+  theme_classic(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 13), legend.text = element_text(face = "bold"), legend.title = element_text(face = "bold")) +
+  guides(color = guide_legend(override.aes = list(size = 5)), shape = guide_legend(override.aes = list(size = 4)))
+ggsave(paste0(aggregate_umap_dir9, "UMAP_aggregate_rod_wk2_vs_rod_wk4.png"), p1, width = 14, height = 9, dpi = 300)
+
+make_aggregate_overlap_umap <- function(obj1, obj1_name, obj2, obj2_name, colors, out_filename, plot_title, label_size = 4.8) {
+  obj1$dataset <- obj1_name; obj2$dataset <- obj2_name
+  pair_obj <- merge(obj1, y = obj2, add.cell.ids = c(obj1_name, obj2_name))
+  DefaultAssay(pair_obj) <- "RNA"
+  pair_obj <- JoinLayers(pair_obj, assay = "RNA")
+  pair_obj <- NormalizeData(pair_obj, assay = "RNA", verbose = FALSE)
+  pair_obj <- FindVariableFeatures(pair_obj, verbose = FALSE)
+  pair_obj <- ScaleData(pair_obj, verbose = FALSE)
+  pair_obj <- RunPCA(pair_obj, verbose = FALSE)
+  pair_obj <- RunUMAP(pair_obj, dims = 1:30, verbose = FALSE)
+  pair_obj$dataset <- factor(pair_obj$dataset, levels = c(obj1_name, obj2_name))
+  pair_obj$cluster_object_label <- paste0(as.character(pair_obj$cell_type_label_updated), " (", as.character(pair_obj$dataset), ")")
+  umap_mat <- Embeddings(pair_obj, "umap")
+  umap_coords <- data.frame(x = umap_mat[, 1], y = umap_mat[, 2], dataset = pair_obj$dataset, cluster_object_label = pair_obj$cluster_object_label)
+  umap_coords <- umap_coords[sample(nrow(umap_coords)), ]
+  label_centroids <- umap_coords %>% group_by(cluster_object_label) %>% summarise(x = median(x), y = median(y), .groups = "drop")
+  p <- ggplot(umap_coords, aes(x = x, y = y, color = dataset)) +
+    geom_point(size = 1.8, alpha = 0.6) +
+    scale_color_manual(values = colors, name = "Object") +
+    geom_text_repel(data = label_centroids, aes(x = x, y = y, label = cluster_object_label), inherit.aes = FALSE, size = label_size, fontface = "bold",
+                     color = "black", bg.color = "white", bg.r = 0.15, max.overlaps = Inf) +
+    xlab("UMAP_1") + ylab("UMAP_2") + ggtitle(plot_title) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", size = 13), legend.text = element_text(face = "bold"), legend.title = element_text(face = "bold")) +
+    guides(color = guide_legend(override.aes = list(size = 5, alpha = 1)))
+  ggsave(paste0(aggregate_umap_dir9, out_filename), p, width = 12, height = 9, dpi = 300)
+  return(pair_obj)
+}
+rod_sphere_pair <- make_aggregate_overlap_umap(rod_wk2, "rod_wk2", sphere_wk2, "sphere_wk2", colors = dataset_colors[c("rod_wk2", "sphere_wk2")],
+  out_filename = "UMAP_overlap_rod_wk2_vs_sphere_wk2.png", plot_title = "Aggregate UMAP overlap: rod_wk2 vs sphere_wk2")
+rod_rod_pair <- make_aggregate_overlap_umap(rod_wk2, "rod_wk2", rod_wk4_04, "rod_wk4", colors = dataset_colors[c("rod_wk2", "rod_wk4")],
+  out_filename = "UMAP_overlap_rod_wk2_vs_rod_wk4.png", plot_title = "Aggregate UMAP overlap: rod_wk2 vs rod_wk4")
+cat("=== Stage 12 complete ===\n")
+
+
+################################################################################
+## STAGE 13: Marker spatial / violin / barplot analyses
+## Gene names capitalised and 1.5x; spatial plots on WHOLE objects with a shared colour range
+## per gene; violins share a y-axis per gene across the pair.
+################################################################################
+get_pathway_genes <- function(pathway_name, db = CellChatDB.mouse) {
+  all_pathways <- unique(db$interaction$pathway_name)
+  match_name <- all_pathways[match(tolower(pathway_name), tolower(all_pathways))]
+  if (is.na(match_name)) { warning("Pathway '", pathway_name, "' not found"); return(character(0)) }
+  interaction_sub <- db$interaction[db$interaction$pathway_name == match_name, ]
+  raw_genes <- unique(c(interaction_sub$ligand, interaction_sub$receptor))
+  resolved <- unlist(lapply(raw_genes, function(g) {
+    if (g %in% rownames(db$complex)) { subunits <- unlist(db$complex[g, ]); subunits[subunits != "" & !is.na(subunits)] } else { g }
+  }))
+  unique(resolved)
+}
+resolve_gene_symbol <- function(gene, obj) {
+  rn <- rownames(obj); idx <- match(tolower(gene), tolower(rn)); if (is.na(idx)) return(NA_character_); rn[idx]
+}
+placeholder_plot <- function(label_text) {
+  ggplot() + theme_void() + annotate("text", x = 0.5, y = 0.5, label = paste0(label_text, "\n(not detected)"), size = 4.5, fontface = "bold") + xlim(0, 1) + ylim(0, 1)
+}
+make_gene_violin <- function(obj, gene, title, subtitle = NULL, y_limits = NULL) {
+  ordered_levels <- natural_cluster_order(unique(as.character(obj$cell_type_label_updated)))
+  colors_this <- celltype_colors_master[ordered_levels]; colors_this[is.na(colors_this)] <- "grey70"; names(colors_this) <- ordered_levels
+  expr <- FetchData(obj, vars = gene, layer = "data")[, 1]; cluster_vec <- as.character(obj$cell_type_label_updated)
+  clusters_expressed <- ordered_levels[sapply(ordered_levels, function(cl) any(expr[cluster_vec == cl] > 0))]
+  if (length(clusters_expressed) == 0) return(NULL)
+  keep_cells <- cluster_vec %in% clusters_expressed
+  df <- data.frame(expr = expr[keep_cells], cluster = factor(cluster_vec[keep_cells], levels = clusters_expressed))
+  p <- ggplot(df, aes(x = cluster, y = expr, fill = cluster)) + geom_violin(scale = "width", trim = TRUE) +
+    geom_jitter(width = 0.15, size = 0.3, alpha = 0.3) + scale_fill_manual(values = colors_this[clusters_expressed]) +
+    theme_classic(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face = "bold"), axis.text.y = element_text(face = "bold"),
+          plot.title = element_text(size = fs(13), face = "bold"), plot.subtitle = element_text(size = 11), legend.position = "none") +
+    labs(title = title, subtitle = subtitle, x = NULL, y = "Expression")
+  if (!is.null(y_limits)) p <- p + coord_cartesian(ylim = y_limits)
+  p
+}
+
+# Part A: pathway-based markers (single object: spatial + per-gene violin)
+make_pathway_marker_plots <- function(obj, obj_name, pathway_name, note, pt_size, square = FALSE) {
+  genes <- intersect(get_pathway_genes(pathway_name, CellChatDB.mouse), rownames(obj))
+  if (length(genes) == 0) { message("No genes found for ", pathway_name, " in ", obj_name); return(invisible(NULL)) }
+  file_tag <- paste0(pathway_name, "_", note, "_", obj_name); ncol_use <- min(3, length(genes))
+
+  p_spatial <- SpatialFeaturePlot(obj, features = genes, pt.size.factor = pt_size, ncol = ncol_use) +
+    plot_annotation(title = paste0(pathway_name, " (", note, "): ", obj_name))
+  p_spatial <- p_spatial & theme(legend.title = element_text(size = fs(11), face = "bold"), legend.text = element_text(face = "bold"))
+  if (square) p_spatial <- p_spatial & theme(aspect.ratio = 1)
+  ggsave(paste0(marker_spatial_violin_dir9, "spatial_", file_tag, ".png"), p_spatial,
+         width = 5 * ncol_use, height = 5 * ceiling(length(genes) / ncol_use), dpi = 300)
+
+  plot_list <- lapply(genes, function(g) make_gene_violin(obj, g, title = cap_gene(g)))
+  plot_list <- plot_list[!sapply(plot_list, is.null)]
+  if (length(plot_list) == 0) { message("No detectable expression for any gene in ", pathway_name, " (", obj_name, ")"); return(invisible(NULL)) }
+  n_clusters_max <- max(sapply(plot_list, function(p) length(levels(p$data$cluster))))
+  ggsave(paste0(marker_spatial_violin_dir9, "violin_", file_tag, ".png"), wrap_plots(plot_list, ncol = ncol_use),
+         width = max(6, n_clusters_max * 0.5) * ncol_use, height = 5 * ceiling(length(plot_list) / ncol_use), dpi = 300)
+}
+
+obj_meta <- list(
+  rod_wk2    = list(obj = rod_wk2,    pt_size = rod_pt_size,    square = FALSE),
+  rod_wk4    = list(obj = rod_wk4_04, pt_size = rod_pt_size,    square = FALSE),
+  sphere_wk2 = list(obj = sphere_wk2, pt_size = sphere_pt_size, square = TRUE)
+)
+
+make_pathway_marker_plots(sphere_wk2, "sphere_wk2", "PROS",        "high_in_spherewk2",     pt_size = sphere_pt_size, square = TRUE)
+make_pathway_marker_plots(sphere_wk2, "sphere_wk2", "ANGPTL",      "high_in_spherewk2",     pt_size = sphere_pt_size, square = TRUE)
+make_pathway_marker_plots(rod_wk2,    "rod_wk2",    "GALECTIN",    "high_in_rodwk2_vs_wk4", pt_size = rod_pt_size)
+make_pathway_marker_plots(rod_wk4_04, "rod_wk4",    "ANGPTL",      "high_in_rodwk4",        pt_size = rod_pt_size)
+make_pathway_marker_plots(rod_wk4_04, "rod_wk4",    "ADIPONECTIN", "high_in_rodwk4",        pt_size = rod_pt_size)
+make_pathway_marker_plots(rod_wk4_04, "rod_wk4",    "PERIOSTIN",   "high_in_rodwk4",        pt_size = rod_pt_size)
+make_pathway_marker_plots(rod_wk4_04, "rod_wk4",    "RESISTIN",    "high_in_rodwk4",        pt_size = rod_pt_size)
+
+# Part B/C: pairwise gene comparison. Spatial always uses the WHOLE objects (obj_meta);
+# violins / averages use `stat_meta` (whole objects, or implant no-FIB-1 subsets when implant = TRUE).
+make_gene_comparison_plots <- function(genes, obj1_name, obj2_name, note, file_prefix, out_dir, stat_meta = obj_meta, implant = FALSE) {
+  info1 <- obj_meta[[obj1_name]]; info2 <- obj_meta[[obj2_name]]
+  s1 <- stat_meta[[obj1_name]]$obj; s2 <- stat_meta[[obj2_name]]$obj
+  resolved1 <- sapply(genes, resolve_gene_symbol, obj = info1$obj); resolved2 <- sapply(genes, resolve_gene_symbol, obj = info2$obj)
+  resolved_s1 <- sapply(genes, resolve_gene_symbol, obj = s1);       resolved_s2 <- sapply(genes, resolve_gene_symbol, obj = s2)
+  keep <- !is.na(resolved1) & !is.na(resolved2) & !is.na(resolved_s1) & !is.na(resolved_s2); genes_use <- genes[keep]
+  if (any(!keep)) message("Genes not found, skipped: ", paste(genes[!keep], collapse = ", "))
+  if (length(genes_use) == 0) { message("No usable genes for ", file_prefix); return(invisible(NULL)) }
+  resolved1 <- resolved1[keep]; resolved2 <- resolved2[keep]; resolved_s1 <- resolved_s1[keep]; resolved_s2 <- resolved_s2[keep]
+  file_tag <- paste0(file_prefix, "_", note, "_", obj1_name, "_vs_", obj2_name, if (implant) "_implant" else "")
+  scope_txt <- if (implant) "Implant-site mean (no FIB-1)" else NULL
+
+  spatial_list <- list(); violin_list <- list()
+  for (i in seq_along(genes_use)) {
+    g_disp <- cap_gene(genes_use[i])
+    sp_range <- range(c(FetchData(info1$obj, vars = resolved1[i], layer = "data")[, 1], FetchData(info2$obj, vars = resolved2[i], layer = "data")[, 1]), na.rm = TRUE)
+    vi_range <- range(c(FetchData(s1, vars = resolved_s1[i], layer = "data")[, 1], FetchData(s2, vars = resolved_s2[i], layer = "data")[, 1]), na.rm = TRUE)
+    sub1 <- if (implant) paste0(scope_txt, " = ", round(mean(FetchData(s1, vars = resolved_s1[i], layer = "data")[, 1]), 3)) else NULL
+    sub2 <- if (implant) paste0(scope_txt, " = ", round(mean(FetchData(s2, vars = resolved_s2[i], layer = "data")[, 1]), 3)) else NULL
+
+    mk_spatial <- function(info, gene, obj_name, sub) {
+      p <- SpatialFeaturePlot(info$obj, features = gene, pt.size.factor = info$pt_size) +
+        scale_fill_gradientn(colors = spatial_colors_100, limits = sp_range, name = g_disp) +
+        labs(title = paste0(g_disp, " (", obj_name, ")"), subtitle = sub) +
+        theme(plot.title = element_text(size = fs(13), face = "bold"), legend.title = element_text(size = fs(11), face = "bold"), legend.text = element_text(face = "bold"))
+      if (info$square) p <- p + theme(aspect.ratio = 1)
+      p
+    }
+    spatial_list[[paste0(g_disp, "_1")]] <- mk_spatial(info1, resolved1[i], obj1_name, sub1)
+    spatial_list[[paste0(g_disp, "_2")]] <- mk_spatial(info2, resolved2[i], obj2_name, sub2)
+
+    v1 <- make_gene_violin(s1, resolved_s1[i], title = paste0(g_disp, " (", obj1_name, ")"), subtitle = sub1, y_limits = vi_range)
+    v2 <- make_gene_violin(s2, resolved_s2[i], title = paste0(g_disp, " (", obj2_name, ")"), subtitle = sub2, y_limits = vi_range)
+    if (is.null(v1)) v1 <- placeholder_plot(paste0(g_disp, " (", obj1_name, ")"))
+    if (is.null(v2)) v2 <- placeholder_plot(paste0(g_disp, " (", obj2_name, ")"))
+    violin_list[[paste0(g_disp, "_1")]] <- v1; violin_list[[paste0(g_disp, "_2")]] <- v2
+  }
+  ttl <- paste0(note, ": ", paste(cap_gene(genes_use), collapse = ", "), " (", obj1_name, " vs ", obj2_name, if (implant) ", spatial = whole object, violin = implant site no FIB-1" else "", "; shared scales per gene)")
+  ggsave(paste0(out_dir, "spatial_", file_tag, ".png"), wrap_plots(spatial_list, ncol = 2) + plot_annotation(title = ttl), width = 10, height = 5.3 * length(genes_use), dpi = 300)
+  ggsave(paste0(out_dir, "violin_", file_tag, ".png"),  wrap_plots(violin_list,  ncol = 2) + plot_annotation(title = ttl), width = 12, height = 5 * length(genes_use), dpi = 300)
+}
+
+make_avg_expr_barplot <- function(genes, obj1_name, obj2_name, note, file_prefix, out_dir, stat_meta) {
+  s1 <- stat_meta[[obj1_name]]$obj; s2 <- stat_meta[[obj2_name]]$obj
+  r1 <- sapply(genes, resolve_gene_symbol, obj = s1); r2 <- sapply(genes, resolve_gene_symbol, obj = s2)
+  keep <- !is.na(r1) & !is.na(r2); genes_use <- genes[keep]
+  if (any(!keep)) message("Genes not found, skipped: ", paste(genes[!keep], collapse = ", "))
+  if (length(genes_use) == 0) { message("No usable genes for ", file_prefix); return(invisible(NULL)) }
+  avg_df <- data.frame(
+    gene = rep(cap_gene(genes_use), 2), object = rep(c(obj1_name, obj2_name), each = length(genes_use)),
+    avg_expr = c(sapply(r1[keep], function(g) mean(FetchData(s1, vars = g, layer = "data")[, 1])),
+                 sapply(r2[keep], function(g) mean(FetchData(s2, vars = g, layer = "data")[, 1]))))
+  avg_df$gene <- factor(avg_df$gene, levels = cap_gene(genes_use)); avg_df$object <- factor(avg_df$object, levels = c(obj1_name, obj2_name))
+  p <- ggplot(avg_df, aes(x = gene, y = avg_expr, fill = object)) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    geom_text(aes(label = round(avg_expr, 2)), position = position_dodge(width = 0.7), vjust = -0.4, size = 4, fontface = "bold") +
+    scale_fill_manual(values = object_bar_colors[c(obj1_name, obj2_name)], name = "Object") +
+    theme_classic(base_size = 13) +
+    theme(axis.text.x = element_text(size = fs(10.4), face = "bold"), axis.text.y = element_text(face = "bold"),
+          legend.text = element_text(face = "bold"), plot.title = element_text(face = "bold", size = 13)) +
+    labs(title = paste0("Average implant-site expression (no FIB-1): ", note, " (", obj1_name, " vs ", obj2_name, ")"), x = NULL, y = "Average expression (log-normalized)")
+  ggsave(paste0(out_dir, "barplot_", file_prefix, "_", note, "_", obj1_name, "_vs_", obj2_name, "_implant.png"), p, width = 9, height = 6.5, dpi = 300)
+}
+
+# Whole-tissue specific genes
+make_gene_comparison_plots(c("Cd44", "Ptprc"), "rod_wk2", "rod_wk4", "GALECTIN", "geneset1", specific_genes_dir9)
+make_gene_comparison_plots(c("Postn"), "rod_wk4", "rod_wk2", "PERIOSTIN", "geneset2", specific_genes_dir9)
+make_gene_comparison_plots(c("Axl"), "sphere_wk2", "rod_wk2", "PROS", "geneset3", specific_genes_dir9)
+make_gene_comparison_plots(c("Sdc4", "Sdc1", "Pirb", "Itgb1", "Angptl2"), "sphere_wk2", "rod_wk2", "ANGPTL", "geneset4", specific_genes_dir9)
+
+new_marker_genes <- c("Spp1", "Cd44", "Itgav", "Itgb1", "Itgb5")
+make_gene_comparison_plots(new_marker_genes, "rod_wk2", "sphere_wk2", "SPP1_adhesion_markers", "markerset1", spp1_allcluster_dir9)
+make_gene_comparison_plots(new_marker_genes, "rod_wk2", "rod_wk4",    "SPP1_adhesion_markers", "markerset1", spp1_allcluster_dir9)
+
+# Implant-restricted (FIB-1 excluded): violins/averages from implant subsets, spatial from whole objects
+rod_wk2_implant_noFIB1    <- subset(rod_wk2_implant,    subset = cell_identity != "FIB-1")
+rod_wk4_implant_noFIB1    <- subset(rod_wk4_implant,    subset = cell_identity != "FIB-1")
+sphere_wk2_implant_noFIB1 <- subset(sphere_wk2_implant, subset = cell_identity != "FIB-1")
+for (nm in c("rod_wk2_implant_noFIB1", "rod_wk4_implant_noFIB1", "sphere_wk2_implant_noFIB1")) {
+  obj <- get(nm); obj$cell_type_label_updated <- droplevels(factor(obj$cell_type_label_updated)); assign(nm, obj)
+}
+obj_meta_implant <- list(
+  rod_wk2    = list(obj = rod_wk2_implant_noFIB1),
+  rod_wk4    = list(obj = rod_wk4_implant_noFIB1),
+  sphere_wk2 = list(obj = sphere_wk2_implant_noFIB1)
+)
+imm_genes <- c("Cd68", "H2-Ab1", "Mrc1")
+make_gene_comparison_plots(imm_genes, "rod_wk2", "sphere_wk2", "IMM_markers", "IMM_geneset", imm_implant_dir9, stat_meta = obj_meta_implant, implant = TRUE)
+make_gene_comparison_plots(imm_genes, "rod_wk2", "rod_wk4",    "IMM_markers", "IMM_geneset", imm_implant_dir9, stat_meta = obj_meta_implant, implant = TRUE)
+make_avg_expr_barplot(imm_genes, "rod_wk2", "sphere_wk2", "IMM_markers", "IMM_geneset", imm_implant_dir9, obj_meta_implant)
+make_avg_expr_barplot(imm_genes, "rod_wk2", "rod_wk4",    "IMM_markers", "IMM_geneset", imm_implant_dir9, obj_meta_implant)
+make_gene_comparison_plots(new_marker_genes, "rod_wk2", "sphere_wk2", "SPP1_adhesion_markers", "markerset1", spp1_implant_dir9, stat_meta = obj_meta_implant, implant = TRUE)
+make_gene_comparison_plots(new_marker_genes, "rod_wk2", "rod_wk4",    "SPP1_adhesion_markers", "markerset1", spp1_implant_dir9, stat_meta = obj_meta_implant, implant = TRUE)
+cat("=== Stage 13 complete ===\n")
+
+
+################################################################################
+## STAGE 14: Implant-highlight spatial plots (implant clusters colored, others grey)
+################################################################################
+make_spatial_implant_highlight <- function(obj, obj_name, out_path, pt_size = 7, square = FALSE, grey_color = "grey80") {
+  ordered_levels <- natural_cluster_order(unique(as.character(obj$cell_type_label_updated)))
+  obj$plot_label <- factor(obj$cell_type_label_updated, levels = ordered_levels)
+  is_implant <- obj$implant_region == "Implant"
+  colors_this <- celltype_colors_master[ordered_levels]; colors_this[is.na(colors_this)] <- grey_color; names(colors_this) <- ordered_levels
+  cluster_is_highlighted <- sapply(ordered_levels, function(cl) any(obj$cell_type_label_updated == cl & is_implant))
+  colors_this[!cluster_is_highlighted] <- grey_color
+  cat("\n--- Color assignment for", obj_name, "---\n")
+  print(data.frame(cluster = ordered_levels, highlighted = cluster_is_highlighted, color = colors_this))
+  p <- SpatialDimPlot(obj, group.by = "plot_label", cols = colors_this, pt.size.factor = pt_size, label = FALSE) +
+    ggtitle(paste0("Implant clusters colored, non-implant grey: ", obj_name)) +
+    theme(plot.title = element_text(face = "bold", size = 13), legend.position = "right", legend.text = element_text(size = 12, face = "bold"))
+  if (square) p <- p + theme(aspect.ratio = 1)
+  ggsave(paste0(out_path, "SpatialDimPlot_", obj_name, "_implant_highlight.png"), p, width = 10, height = 8, dpi = 300)
+}
+make_spatial_implant_highlight(rod_wk2,    "rod_wk2",    wk2_path9, pt_size = rod_pt_size,    square = FALSE)
+make_spatial_implant_highlight(rod_wk4_04, "rod_wk4",    wk4_path9, pt_size = rod_pt_size,    square = FALSE)
+make_spatial_implant_highlight(sphere_wk2, "sphere_wk2", sph_path9, pt_size = sphere_pt_size, square = TRUE)
+cat("=== Stage 14 complete ===\n")
+
+
+################################################################################
+## STAGE 15: Intra-object IMM/FIB pairwise DE + GO (whole object, all pairwise combinations)
+################################################################################
+run_cluster_de_block <- function(obj, group_col, ident1, ident2, comparison_name, out_dir, min_pct=0.1, logfc_threshold=0.25) {
+  dir.create(out_dir, recursive=TRUE, showWarnings=FALSE)
+  markers <- tryCatch(FindMarkers(obj, group.by=group_col, ident.1=ident1, ident.2=ident2, min.pct=min_pct, logfc.threshold=logfc_threshold, assay="RNA"), error=function(e) NULL)
+  if (is.null(markers) || nrow(markers)==0) return(invisible(NULL))
+  markers <- markers %>% tibble::rownames_to_column("gene") %>% arrange(p_val_adj)
+  markers$sig <- "NS"; markers$sig[markers$p_val_adj<0.05 & markers$avg_log2FC>0.25] <- "Up"; markers$sig[markers$p_val_adj<0.05 & markers$avg_log2FC< -0.25] <- "Down"
+  write.csv(markers, paste0(out_dir,"DEG_",comparison_name,".csv"), row.names=FALSE)
+  top_labels <- markers %>% filter(sig!="NS") %>% arrange(p_val_adj) %>% head(20)
+  p_volcano <- ggplot(markers, aes(x=avg_log2FC, y=-log10(p_val_adj+1e-300), color=sig)) + geom_point(alpha=0.6, size=1) +
+    scale_color_manual(values=c(Up="red",Down="blue",NS="grey70")) +
+    geom_text_repel(data=top_labels, aes(label=cap_gene(gene)), size=fs(3), fontface="bold", max.overlaps=30, color="black") +
+    theme_classic(base_size=13) + bold_axes(12) + labs(title=paste0("Volcano: ",comparison_name), x="log2FC", y="-log10(adj p-value)")
+  save_plot_to(p_volcano, paste0("volcano_", comparison_name), out_dir, out_dir, width=9, height=8)
+
+  top_genes <- c(markers %>% filter(sig=="Up") %>% arrange(p_val_adj) %>% head(15) %>% pull(gene),
+                 markers %>% filter(sig=="Down") %>% arrange(p_val_adj) %>% head(15) %>% pull(gene))
+  if (length(top_genes)>0) {
+    p_dot <- DotPlot(obj, features=top_genes, group.by=group_col) + RotatedAxis() +
+      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0, name="Average\nExpression") + ggtitle(paste0("Top DEGs: ",comparison_name)) +
+      theme(axis.text.x = element_text(size = fs(11), face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+    save_plot_to(p_dot, paste0("top_DEG_dotplot_", comparison_name), out_dir, out_dir, width=max(12, 0.55*length(top_genes)+4), height=7)
+  }
+  run_go_bp(markers %>% filter(sig!="NS") %>% pull(gene), comparison_name, out_dir)
+}
+run_intra_object_cluster_comparison <- function(obj, obj_name, cluster1, cluster2, comparison_tag, out_dir) {
+  sub_obj <- subset(obj, subset = cell_type_label_updated %in% c(cluster1, cluster2))
+  sub_obj$cell_type_label_updated <- droplevels(factor(sub_obj$cell_type_label_updated))
+  run_cluster_de_block(sub_obj, "cell_type_label_updated", cluster1, cluster2, paste0(obj_name, "_", comparison_tag), out_dir)
+}
+run_all_pairwise <- function(obj, obj_name, cluster_vec, lineage_tag, out_dir) {
+  if (length(cluster_vec) < 2) { message("Skipping ", lineage_tag, " for ", obj_name, " -- only ", length(cluster_vec), " cluster(s)"); return(invisible(NULL)) }
+  for (pr in combn(cluster_vec, 2, simplify = FALSE)) {
+    c1 <- pr[1]; c2 <- pr[2]
+    comparison_tag <- paste0(lineage_tag, "_", gsub("[^A-Za-z0-9]+", "_", c1), "_vs_", gsub("[^A-Za-z0-9]+", "_", c2))
+    run_intra_object_cluster_comparison(obj, obj_name, c1, c2, comparison_tag, paste0(out_dir, obj_name, "/"))
+  }
+}
+pure_imm_clusters <- list(rod_wk2 = c("C1-IMM-1", "C2-IMM-2"), rod_wk4 = c("C0-IMM-1"), sphere_wk2 = c("C2-IMM-1", "C3-IMM-2"))
+pure_fib_clusters <- list(rod_wk2 = c("C3-FIB-1", "C7-FIB-2"), rod_wk4 = c("C3-FIB-1", "C4-FIB-2", "C8-FIB-3"), sphere_wk2 = c("C4-FIB-2", "C5-FIB-1"))
+objs_lookup <- list(rod_wk2 = rod_wk2, rod_wk4 = rod_wk4_04, sphere_wk2 = sphere_wk2)
+for (nm in names(objs_lookup)) {
+  run_all_pairwise(objs_lookup[[nm]], nm, pure_imm_clusters[[nm]], "IMM", imm_fib_go_dir9)
+  run_all_pairwise(objs_lookup[[nm]], nm, pure_fib_clusters[[nm]], "FIB", imm_fib_go_dir9)
+}
+cat("=== Stage 15 complete ===\n")
+
+
+################################################################################
+## STAGE 16: Gene module scores (violin+boxplot+Wilcoxon, all identities) + spatial (shared scale)
+## Score columns carry clean names: ImmuneSig / MacAct / Growth / Fibrosis
+################################################################################
+genes_list <- list(
+  immune_signaling      = c("Ccl2", "Ccl3", "Ccl4", "Ccl5", "Mif"),
+  macrophage_activation = c("Spp1", "Arg1", "Mrc1"),
+  growth_remodeling     = c("Igf1", "Igf2", "Fgf2", "Fgf7"),
+  fibrosis_remodeling   = c("Tgfb1", "Tgfb2", "Col1a1", "Col3a1", "Postn")
+)
+module_names <- c(ImmuneSig = "Immune signaling", MacAct = "Macrophage activation", Growth = "Growth / remodeling", Fibrosis = "Fibrosis / remodeling")
+modules <- names(module_names)
+
+combined <- AddModuleScore(combined, features = genes_list, name = c("ImmuneSig", "MacAct", "Growth", "Fibrosis"))   # yields ImmuneSig1, MacAct2, Growth3, Fibrosis4
+combined$ImmuneSig <- combined$ImmuneSig1; combined$MacAct   <- combined$MacAct2
+combined$Growth    <- combined$Growth3;    combined$Fibrosis <- combined$Fibrosis4
+combined$ImmuneSig1 <- NULL; combined$MacAct2 <- NULL; combined$Growth3 <- NULL; combined$Fibrosis4 <- NULL
+saveRDS(combined, paste0(final9_path, "combined_all3_seurat.rds"))
+
+run_module_score_comparison <- function(combined, conditions, comparison_tag, out_dir) {
+  sub_obj <- subset(combined, subset = dataset %in% conditions)
+  sub_obj$dataset <- factor(sub_obj$dataset, levels = conditions)
+  identity_levels <- intersect(master_identity_order, unique(sub_obj$cell_identity))
+  sub_obj$cell_identity <- factor(sub_obj$cell_identity, levels = identity_levels)
+  plot_df <- FetchData(sub_obj, vars = c("cell_identity", "dataset", modules))
+  plot_df_long <- plot_df %>%
+    pivot_longer(cols = all_of(modules), names_to = "module", values_to = "score") %>%
+    mutate(module_label = module_names[module], dataset = factor(dataset, levels = conditions), cell_identity = factor(cell_identity, levels = identity_levels))
+  colors_use <- dataset_colors[conditions]
+  axis_th <- theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+
+  for (mod in modules) {
+    df_mod <- plot_df_long %>% filter(module == mod, !is.na(score))
+    stat_df <- tryCatch({
+      df_mod %>% group_by(cell_identity) %>% filter(n_distinct(dataset) == 2) %>%
+        wilcox_test(score ~ dataset) %>% add_significance("p") %>% add_xy_position(x = "cell_identity", dodge = 0.85)
+    }, error = function(e) data.frame())
+    p <- ggplot(df_mod, aes(x = cell_identity, y = score, fill = dataset)) +
+      geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+      geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+      scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+      theme(plot.title = element_text(size = 16, face = "bold")) +
+      labs(title = paste0(module_names[mod], ": ", conditions[1], " vs ", conditions[2], " per cell type"), x = NULL, y = "Module score", fill = "Object")
+    if (nrow(stat_df) > 0) p <- p + stat_pvalue_manual(stat_df, label = "p.signif", hide.ns = TRUE, tip.length = 0.01)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", mod, "_", comparison_tag, ".jpeg"), p, width = 11, height = 7, dpi = 300)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", mod, "_", comparison_tag, ".pdf"),  p, width = 11, height = 7)
+  }
+  p_all_stats <- ggplot(plot_df_long, aes(x = cell_identity, y = score, fill = dataset)) +
+    geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+    geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+    facet_wrap(~ module_label, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+    theme(strip.text = element_text(size = 13, face = "bold"), plot.title = element_text(size = 17, face = "bold")) +
+    labs(title = paste0("Module scores across all cell identities: ", conditions[1], " vs ", conditions[2]), x = NULL, y = "Module score", fill = "Object")
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Modules_", comparison_tag, ".jpeg"), p_all_stats, width = 15, height = 10, dpi = 300)
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Modules_", comparison_tag, ".pdf"),  p_all_stats, width = 15, height = 10)
+}
+run_module_score_comparison(combined, c("rod_wk2", "sphere_wk2"), "rod_wk2_vs_sphere_wk2", gene_module_dir9)
+run_module_score_comparison(combined, c("rod_wk2", "rod_wk4"),    "rod_wk2_vs_rod_wk4",    gene_module_dir9)
+
+transfer_module_scores <- function(target_obj, obj_prefix, combined_obj, score_cols) {
+  prefixed_names <- paste0(obj_prefix, "_", colnames(target_obj))
+  matched <- combined_obj@meta.data[prefixed_names, score_cols, drop = FALSE]
+  for (col in score_cols) target_obj[[col]] <- matched[[col]]
+  target_obj
+}
+rod_wk2    <- transfer_module_scores(rod_wk2,    "rod_wk2",    combined, modules)
+rod_wk4_04 <- transfer_module_scores(rod_wk4_04, "rod_wk4",    combined, modules)
+sphere_wk2 <- transfer_module_scores(sphere_wk2, "sphere_wk2", combined, modules)
+
+obj_meta <- list(
+  rod_wk2    = list(obj = rod_wk2,    pt_size = rod_pt_size,    square = FALSE),
+  rod_wk4    = list(obj = rod_wk4_04, pt_size = rod_pt_size,    square = FALSE),
+  sphere_wk2 = list(obj = sphere_wk2, pt_size = sphere_pt_size, square = TRUE)
+)
+
+make_module_score_spatial_plots <- function(mod_col, mod_label, obj1_name, obj2_name, out_dir) {
+  i1 <- obj_meta[[obj1_name]]; i2 <- obj_meta[[obj2_name]]
+  shared_range <- range(c(FetchData(i1$obj, vars = mod_col)[, 1], FetchData(i2$obj, vars = mod_col)[, 1]), na.rm = TRUE)
+  mk <- function(info, obj_name) {
+    p <- SpatialFeaturePlot(info$obj, features = mod_col, pt.size.factor = info$pt_size) +
+      scale_fill_gradientn(colors = spatial_colors_100, limits = shared_range, name = mod_label) +
+      ggtitle(paste0(mod_label, " (", obj_name, ")")) +
+      theme(plot.title = element_text(size = 13, face = "bold"), legend.title = element_text(face = "bold"), legend.text = element_text(face = "bold"))
+    if (info$square) p <- p + theme(aspect.ratio = 1)
+    p
+  }
+  p_spatial <- mk(i1, obj1_name) + mk(i2, obj2_name) + plot_annotation(title = paste0(mod_label, " (module score, shared color scale): ", obj1_name, " vs ", obj2_name))
+  ggsave(paste0(out_dir, "spatial_", mod_col, "_", obj1_name, "_vs_", obj2_name, ".png"), p_spatial, width = 10, height = 5, dpi = 300)
+}
+for (col in modules) {
+  make_module_score_spatial_plots(col, module_names[col], "rod_wk2", "sphere_wk2", gene_module_spatial_dir9)
+  make_module_score_spatial_plots(col, module_names[col], "rod_wk2", "rod_wk4",    gene_module_spatial_dir9)
+}
+cat("=== Stage 16 complete -- Final_Analysis_9 core pipeline finished ===\n")
+
+
+################################################################################
+################################################################################
+## UPDATED BATCH  (outputs written under Final_Analysis_9/Updated/)
+################################################################################
+################################################################################
+
+################################################################################
+## UPDATED PART 0: shared Excel helper (README documents every column of every sheet)
+################################################################################
+write_workbook_with_readme <- function(path, sheets, col_dict, overview) {
+  all_cols <- unique(unlist(lapply(sheets, colnames)))
+  undocumented <- setdiff(all_cols, names(col_dict))
+  if (length(undocumented) > 0) stop("Columns missing from the README dictionary: ", paste(undocumented, collapse = ", "))
+  readme_cols <- bind_rows(lapply(names(sheets), function(s)
+    data.frame(sheet = s, column = colnames(sheets[[s]]), meaning = unname(col_dict[colnames(sheets[[s]])]), stringsAsFactors = FALSE)))
+  hdr <- createStyle(textDecoration = "bold", fgFill = "#E8E8F0")
+  wb <- createWorkbook()
+  addWorksheet(wb, "README")
+  writeData(wb, "README", overview, startRow = 1, headerStyle = hdr)
+  writeData(wb, "README", readme_cols, startRow = nrow(overview) + 3, headerStyle = hdr)
+  setColWidths(wb, "README", cols = 1:3, widths = c(34, 34, 120))
+  for (s in names(sheets)) {
+    addWorksheet(wb, s); writeData(wb, s, sheets[[s]], withFilter = TRUE, headerStyle = hdr)
+    freezePane(wb, s, firstRow = TRUE); setColWidths(wb, s, cols = seq_len(ncol(sheets[[s]])), widths = "auto")
+  }
+  dir.create(tempdir(), recursive = TRUE, showWarnings = FALSE)   # openxlsx needs R's session temp folder to exist
+  tryCatch(saveWorkbook(wb, path, overwrite = TRUE), error = function(e) {
+    message("Excel write failed (", conditionMessage(e), ") -- writing one CSV per sheet instead")
+    for (s in names(sheets)) write.csv(sheets[[s]], sub("\\.xlsx$", paste0("_", s, ".csv"), path), row.names = FALSE)
+  })
+  invisible(readme_cols)
+}
+col_dict <- c(
+  # FindAllMarkers-based tables
+  gene = "Gene symbol",
+  cluster = "Cluster the gene is a marker of (that cluster vs all other spots of the same object)",
+  p_val = "Raw p-value, Wilcoxon rank-sum test, cluster vs all other spots",
+  avg_log2FC = "Average log2 fold-change, cluster vs all other spots (positive = higher in the cluster)",
+  pct.1 = "Fraction of spots inside the cluster in which the gene is detected",
+  pct.2 = "Fraction of spots outside the cluster in which the gene is detected",
+  p_val_adj = "Bonferroni-adjusted p-value (adjusted over all genes tested in that object)",
+  rank_in_cluster = "Rank among the cluster's significant markers by avg_log2FC (1 = highest); ranks 1-10 form the cluster's module gene set",
+  # Axis dumbbell tables
+  lineage = "Lineage whose axes were scored: FIB or IMM",
+  comparison = "compared_object minus reference_object",
+  reference_object = "Reference sample (rod_wk2)",
+  compared_object = "Sample compared against the reference",
+  identity = "Cell identity (cell type shared by both objects) the spots belong to",
+  identity_type = "pure = single cell type; mixed = identity containing '&'",
+  axis_group = "Axis group the module belongs to (e.g. FIB_Pool)",
+  module = "Internal module name (axis group + module)",
+  module_label = "Display name of the module as used in the plots",
+  n_ref = "Number of reference spots of this identity (implant region)",
+  n_other = "Number of compared-object spots of this identity (implant region)",
+  median_ref = "Median module score, reference spots",
+  median_other = "Median module score, compared-object spots",
+  median_diff = "median_other minus median_ref",
+  mean_ref = "Mean module score, reference spots",
+  mean_other = "Mean module score, compared-object spots",
+  mean_diff = "mean_other minus mean_ref",
+  W = "Wilcoxon rank-sum statistic (Mann-Whitney U): number of (compared spot, reference spot) pairs where the compared spot scores higher; ties count 0.5",
+  prob_superiority = "W / (n_other * n_ref): probability a random compared spot outscores a random reference spot (0.5 = no shift, >0.5 higher, <0.5 lower)",
+  p_raw = "Raw two-sided Wilcoxon rank-sum p-value (normal approximation)",
+  p_adj_BH = "Benjamini-Hochberg adjusted p-value across all modules of the lineage within this comparison x identity",
+  stars = "Significance stars from p_adj_BH: * < 0.05, ** < 0.01, *** < 0.001, **** < 0.0001, ns otherwise",
+  significant = "TRUE when p_adj_BH < 0.05",
+  status_median = "higher / lower = significant shift in the compared object (direction from median_diff, or prob_superiority if |median_diff| is below the cutoff); ns = not significant",
+  status_mean = "Same as status_median but direction taken from mean_diff",
+  unchanged_but_significant_median = "TRUE when significant but |median_diff| is below the 'unchanged' cutoff",
+  unchanged_but_significant_mean = "TRUE when significant but |mean_diff| is below the 'unchanged' cutoff"
+)
+
+
+################################################################################
+## UPDATED PART 1: Gene module scores -- violin/boxplot restricted to COMMON cell identities
+## (spatial plots are already shared-scale in Stage 16; re-run here only for folder parity with F8)
+################################################################################
+gene_module_common_dir9  <- paste0(updated9_path, "Gene_Module_Scores_only_common_clusters/")
+gene_module_spatial_upd9 <- paste0(updated9_path, "Gene_Module_Spatial/")
+for (d in c(gene_module_common_dir9, gene_module_spatial_upd9)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+run_module_score_comparison_common <- function(combined, conditions, comparison_tag, out_dir) {
+  sub_obj <- subset(combined, subset = dataset %in% conditions)
+  sub_obj$dataset <- factor(sub_obj$dataset, levels = conditions)
+  shared_identities <- intersect(unique(sub_obj$cell_identity[sub_obj$dataset == conditions[1]]),
+                                 unique(sub_obj$cell_identity[sub_obj$dataset == conditions[2]]))
+  sub_obj <- subset(sub_obj, subset = cell_identity %in% shared_identities)
+  identity_levels <- intersect(master_identity_order, shared_identities)
+  sub_obj$cell_identity <- factor(sub_obj$cell_identity, levels = identity_levels)
+  plot_df <- FetchData(sub_obj, vars = c("cell_identity", "dataset", modules))
+  plot_df_long <- plot_df %>%
+    pivot_longer(cols = all_of(modules), names_to = "module", values_to = "score") %>%
+    mutate(module_label = module_names[module], dataset = factor(dataset, levels = conditions), cell_identity = factor(cell_identity, levels = identity_levels))
+  colors_use <- dataset_colors[conditions]
+  axis_th <- theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+  for (mod in modules) {
+    df_mod <- plot_df_long %>% filter(module == mod, !is.na(score))
+    stat_df <- tryCatch({
+      df_mod %>% group_by(cell_identity) %>% filter(n_distinct(dataset) == 2) %>%
+        wilcox_test(score ~ dataset) %>% add_significance("p") %>% add_xy_position(x = "cell_identity", dodge = 0.85)
+    }, error = function(e) data.frame())
+    p <- ggplot(df_mod, aes(x = cell_identity, y = score, fill = dataset)) +
+      geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+      geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+      scale_fill_manual(values = colors_use) + theme_classic() + axis_th + theme(plot.title = element_text(size = 16, face = "bold")) +
+      labs(title = paste0(module_names[mod], ": ", conditions[1], " vs ", conditions[2], " (shared cell identities only)"), x = NULL, y = "Module score", fill = "Object")
+    if (nrow(stat_df) > 0) p <- p + stat_pvalue_manual(stat_df, label = "p.signif", hide.ns = TRUE, tip.length = 0.01)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", mod, "_", comparison_tag, "_common_clusters.jpeg"), p, width = 11, height = 7, dpi = 300)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", mod, "_", comparison_tag, "_common_clusters.pdf"),  p, width = 11, height = 7)
+  }
+  p_all <- ggplot(plot_df_long, aes(x = cell_identity, y = score, fill = dataset)) +
+    geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+    geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+    facet_wrap(~ module_label, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+    theme(strip.text = element_text(size = 13, face = "bold"), plot.title = element_text(size = 17, face = "bold")) +
+    labs(title = paste0("Module scores, shared cell identities only: ", conditions[1], " vs ", conditions[2]), x = NULL, y = "Module score", fill = "Object")
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Modules_", comparison_tag, "_common_clusters.jpeg"), p_all, width = 15, height = 10, dpi = 300)
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Modules_", comparison_tag, "_common_clusters.pdf"),  p_all, width = 15, height = 10)
+}
+run_module_score_comparison_common(combined, c("rod_wk2", "sphere_wk2"), "rod_wk2_vs_sphere_wk2", gene_module_common_dir9)
+run_module_score_comparison_common(combined, c("rod_wk2", "rod_wk4"),    "rod_wk2_vs_rod_wk4",    gene_module_common_dir9)
+for (col in modules) {
+  make_module_score_spatial_plots(col, module_names[col], "rod_wk2", "sphere_wk2", gene_module_spatial_upd9)
+  make_module_score_spatial_plots(col, module_names[col], "rod_wk2", "rod_wk4",    gene_module_spatial_upd9)
+}
+cat("=== Updated Part 1 complete ===\n")
+
+
+################################################################################
+## UPDATED PART 2: 8-gene marker panel (spatial + violin, shared scales) and gene-expression
+## violin/boxplots restricted to common cell identities
+################################################################################
+marker_upd_dir9    <- paste0(updated9_path, "Marker_Spatial_Violin/Specific_Genes/")
+marker_common_dir9 <- paste0(updated9_path, "Marker_Gene_Expression_only_common_clusters/")
+for (d in c(marker_upd_dir9, marker_common_dir9)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+custom_marker_genes <- c("Pdgfrl", "Aoc1", "Sfrp4", "Smpd3", "Col6a6", "Cd300lf", "Fcer1g", "Lgals3")
+
+make_gene_comparison_plots(custom_marker_genes, "rod_wk2", "rod_wk4",    "custom_marker_panel", "markerpanel1", marker_upd_dir9)
+make_gene_comparison_plots(custom_marker_genes, "rod_wk2", "sphere_wk2", "custom_marker_panel", "markerpanel1", marker_upd_dir9)
+
+run_gene_expression_comparison_common <- function(combined, genes, conditions, comparison_tag, out_dir) {
+  sub_obj <- subset(combined, subset = dataset %in% conditions)
+  sub_obj$dataset <- factor(sub_obj$dataset, levels = conditions)
+  shared_identities <- intersect(unique(sub_obj$cell_identity[sub_obj$dataset == conditions[1]]),
+                                 unique(sub_obj$cell_identity[sub_obj$dataset == conditions[2]]))
+  sub_obj <- subset(sub_obj, subset = cell_identity %in% shared_identities)
+  identity_levels <- intersect(master_identity_order, shared_identities)
+  sub_obj$cell_identity <- factor(sub_obj$cell_identity, levels = identity_levels)
+  genes_use <- intersect(genes, rownames(sub_obj))
+  if (length(setdiff(genes, genes_use)) > 0) message("Genes not found, skipped: ", paste(setdiff(genes, genes_use), collapse = ", "))
+  if (length(genes_use) == 0) return(invisible(NULL))
+  plot_df <- FetchData(sub_obj, vars = c("cell_identity", "dataset", genes_use), layer = "data")
+  plot_df_long <- plot_df %>%
+    pivot_longer(cols = all_of(genes_use), names_to = "gene", values_to = "expr") %>%
+    mutate(dataset = factor(dataset, levels = conditions), cell_identity = factor(cell_identity, levels = identity_levels), gene = factor(gene, levels = genes_use))
+  colors_use <- dataset_colors[conditions]
+  axis_th <- theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+  for (g in genes_use) {
+    df_g <- plot_df_long %>% filter(gene == g)
+    stat_df <- tryCatch({
+      df_g %>% group_by(cell_identity) %>% filter(n_distinct(dataset) == 2) %>%
+        wilcox_test(expr ~ dataset) %>% add_significance("p") %>% add_xy_position(x = "cell_identity", dodge = 0.85)
+    }, error = function(e) data.frame())
+    p <- ggplot(df_g, aes(x = cell_identity, y = expr, fill = dataset)) +
+      geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+      geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+      scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+      theme(plot.title = element_text(size = fs(13), face = "bold")) +
+      labs(title = paste0(cap_gene(g), ": ", conditions[1], " vs ", conditions[2], " (shared cell identities only)"),
+           x = NULL, y = paste0(cap_gene(g), " expression"), fill = "Object")
+    if (nrow(stat_df) > 0) p <- p + stat_pvalue_manual(stat_df, label = "p.signif", hide.ns = TRUE, tip.length = 0.01)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", g, "_", comparison_tag, "_common_clusters.jpeg"), p, width = 11, height = 7, dpi = 300)
+    ggsave(paste0(out_dir, "Violin_Boxplot_Stats_", g, "_", comparison_tag, "_common_clusters.pdf"),  p, width = 11, height = 7)
+  }
+  plot_df_long$gene_label <- factor(cap_gene(as.character(plot_df_long$gene)), levels = cap_gene(genes_use))
+  p_all <- ggplot(plot_df_long, aes(x = cell_identity, y = expr, fill = dataset)) +
+    geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+    geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+    facet_wrap(~ gene_label, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+    theme(strip.text = element_text(size = fs(13), face = "bold"), plot.title = element_text(size = 17, face = "bold")) +
+    labs(title = paste0("Marker gene expression, shared cell identities only: ", conditions[1], " vs ", conditions[2]), x = NULL, y = "Expression", fill = "Object")
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Genes_", comparison_tag, "_common_clusters.jpeg"), p_all, width = 15, height = 14, dpi = 300)
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_Genes_", comparison_tag, "_common_clusters.pdf"),  p_all, width = 15, height = 14)
+}
+run_gene_expression_comparison_common(combined, custom_marker_genes, c("rod_wk2", "rod_wk4"),    "rod_wk2_vs_rod_wk4",    marker_common_dir9)
+run_gene_expression_comparison_common(combined, custom_marker_genes, c("rod_wk2", "sphere_wk2"), "rod_wk2_vs_sphere_wk2", marker_common_dir9)
+cat("=== Updated Part 2 complete ===\n")
+
+
+################################################################################
+## UPDATED PART 3: Pair trackplots, module-score version
+## Top-10 DEGs per cluster (p_val_adj <= 0.05) -> module score per cluster -> trackplot; + DEG Excel
+## Axis labels 18 pt bold, capitalised ("Rod wk4 C1-IMM-1")
+################################################################################
+pair_trackplot_module_dir9 <- paste0(updated9_path, "Pair_Trackplot_Module_Score/")
+dir.create(pair_trackplot_module_dir9, recursive = TRUE, showWarnings = FALSE)
+
+compute_full_markers <- function(obj) {
+  obj_de <- obj
+  DefaultAssay(obj_de) <- "RNA"
+  if (nrow(GetAssayData(obj_de, assay = "RNA", layer = "data")) == 0) obj_de <- NormalizeData(obj_de, assay = "RNA")
+  Idents(obj_de) <- obj_de$cell_type_label_updated
+  FindAllMarkers(obj_de, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+}
+get_sig_markers <- function(full_markers) full_markers %>% filter(p_val_adj <= 0.05) %>% arrange(cluster, desc(avg_log2FC))
+get_top10_significant <- function(full_markers) {
+  full_markers %>% filter(p_val_adj <= 0.05) %>% group_by(cluster) %>% arrange(desc(avg_log2FC), .by_group = TRUE) %>%
+    mutate(rank_in_cluster = row_number()) %>% slice_head(n = 10) %>% ungroup()
+}
+full_markers_rod_wk2    <- compute_full_markers(rod_wk2)
+full_markers_rod_wk4    <- compute_full_markers(rod_wk4_04)
+full_markers_sphere_wk2 <- compute_full_markers(sphere_wk2)
+sig_rod_wk2 <- get_sig_markers(full_markers_rod_wk2); sig_rod_wk4 <- get_sig_markers(full_markers_rod_wk4); sig_sphere_wk2 <- get_sig_markers(full_markers_sphere_wk2)
+top10_rod_wk2 <- get_top10_significant(full_markers_rod_wk2); top10_rod_wk4 <- get_top10_significant(full_markers_rod_wk4); top10_sphere_wk2 <- get_top10_significant(full_markers_sphere_wk2)
+
+for (tbl_name in c("top10_rod_wk2", "top10_rod_wk4", "top10_sphere_wk2")) {
+  short_clusters <- get(tbl_name) %>% count(cluster) %>% filter(n < 10)
+  if (nrow(short_clusters) > 0) { message(tbl_name, ": clusters with <10 significant DEGs (p_val_adj <= 0.05):"); print(short_clusters) }
+}
+
+deg_overview <- data.frame(
+  item = c("Method", "Cutoffs", "Top-10 rule", "Sheets"),
+  description = c("Seurat FindAllMarkers per object, each cluster vs all other spots (only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25).",
+                  "Only genes with p_val_adj <= 0.05 are kept in every sheet.",
+                  "Per cluster the top 10 significant genes by avg_log2FC form its module gene set; clusters with fewer than 10 significant genes get fewer.",
+                  "*_sig_DEGs = all significant markers; *_top10_per_cluster = the genes used for module scoring."),
+  stringsAsFactors = FALSE)
+write_workbook_with_readme(paste0(pair_trackplot_module_dir9, "DEG_results_rod_wk2_vs_rod_wk4.xlsx"),
+  list(rod_wk2_sig_DEGs = sig_rod_wk2, rod_wk4_sig_DEGs = sig_rod_wk4, rod_wk2_top10_per_cluster = top10_rod_wk2, rod_wk4_top10_per_cluster = top10_rod_wk4),
+  col_dict, deg_overview)
+write_workbook_with_readme(paste0(pair_trackplot_module_dir9, "DEG_results_rod_wk2_vs_sphere_wk2.xlsx"),
+  list(rod_wk2_sig_DEGs = sig_rod_wk2, sphere_wk2_sig_DEGs = sig_sphere_wk2, rod_wk2_top10_per_cluster = top10_rod_wk2, sphere_wk2_top10_per_cluster = top10_sphere_wk2),
+  col_dict, deg_overview)
+
+clusters_rod_wk2    <- natural_cluster_order(unique(as.character(rod_wk2$cell_type_label_updated)))
+clusters_rod_wk4    <- natural_cluster_order(unique(as.character(rod_wk4_04$cell_type_label_updated)))
+clusters_sphere_wk2 <- natural_cluster_order(unique(as.character(sphere_wk2$cell_type_label_updated)))
+module_gene_sets_wk4 <- c(
+  setNames(lapply(clusters_rod_wk2, function(cl) top10_rod_wk2$gene[top10_rod_wk2$cluster == cl]), paste0("rod_wk2_", clusters_rod_wk2)),
+  setNames(lapply(clusters_rod_wk4, function(cl) top10_rod_wk4$gene[top10_rod_wk4$cluster == cl]), paste0("rod_wk4_", clusters_rod_wk4)))
+module_gene_sets_sphere <- c(
+  setNames(lapply(clusters_rod_wk2,    function(cl) top10_rod_wk2$gene[top10_rod_wk2$cluster == cl]),       paste0("rod_wk2_", clusters_rod_wk2)),
+  setNames(lapply(clusters_sphere_wk2, function(cl) top10_sphere_wk2$gene[top10_sphere_wk2$cluster == cl]), paste0("sphere_wk2_", clusters_sphere_wk2)))
+
+add_module_scores_safe <- function(obj, module_list) {
+  for (mod_name in names(module_list)) {
+    genes_present <- intersect(module_list[[mod_name]], rownames(obj))
+    if (length(genes_present) == 0) next
+    obj <- AddModuleScore(obj, features = list(genes_present), name = "TmpModScore")
+    obj[[mod_name]] <- obj$TmpModScore1
+    obj$TmpModScore1 <- NULL
+  }
+  obj
+}
+rod_wk2_modscored_wk4    <- add_module_scores_safe(rod_wk2,    module_gene_sets_wk4)
+rod_wk4_modscored        <- add_module_scores_safe(rod_wk4_04, module_gene_sets_wk4)
+rod_wk2_modscored_sphere <- add_module_scores_safe(rod_wk2,    module_gene_sets_sphere)
+sphere_wk2_modscored     <- add_module_scores_safe(sphere_wk2, module_gene_sets_sphere)
+
+make_pair_trackplot_module_score <- function(obj1_scored, obj1_name, obj2_scored, obj2_name, out_filename, plot_title) {
+  clusters1 <- natural_cluster_order(unique(as.character(obj1_scored$cell_type_label_updated)))
+  clusters2 <- natural_cluster_order(unique(as.character(obj2_scored$cell_type_label_updated)))
+  clusters_df <- bind_rows(
+    data.frame(obj_name = obj1_name, cluster = clusters1, identity = unname(label_to_identity[clusters1]), stringsAsFactors = FALSE),
+    data.frame(obj_name = obj2_name, cluster = clusters2, identity = unname(label_to_identity[clusters2]), stringsAsFactors = FALSE))
+  clusters_df$identity <- factor(clusters_df$identity, levels = intersect(master_identity_order, unique(clusters_df$identity)))
+  clusters_df$obj_name <- factor(clusters_df$obj_name, levels = c(obj1_name, obj2_name))
+  clusters_df <- clusters_df %>% arrange(identity, obj_name)
+  clusters_df$cluster_num  <- seq_len(nrow(clusters_df))
+  clusters_df$stripe_color <- dataset_colors[as.character(clusters_df$obj_name)]
+  clusters_df$plot_label   <- paste(cap_label(as.character(clusters_df$obj_name)), clusters_df$cluster)   # "Rod wk4 C1-IMM-1"
+  clusters_df$module_col   <- paste0(as.character(clusters_df$obj_name), "_", clusters_df$cluster)         # internal column name
+  obj_lookup     <- setNames(list(obj1_scored, obj2_scored), c(obj1_name, obj2_name))
+  plot_order     <- clusters_df$plot_label
+  cluster_colors <- setNames(celltype_colors_master[clusters_df$cluster], plot_order)
+  n_total        <- length(plot_order)
+
+  n_bins <- 10; bin_data_list <- list()
+  for (i in seq_len(nrow(clusters_df))) {
+    obj_this <- obj_lookup[[as.character(clusters_df$obj_name[i])]]
+    cells    <- colnames(obj_this)[obj_this@meta.data[["cell_type_label_updated"]] == clusters_df$cluster[i]]
+    meta_sub <- obj_this@meta.data[cells, , drop = FALSE]
+    for (j in seq_len(nrow(clusters_df))) {
+      mod_col <- clusters_df$module_col[j]
+      if (!(mod_col %in% colnames(meta_sub))) next
+      mod_vals <- meta_sub[[mod_col]]
+      n_cells  <- length(mod_vals); if (n_cells == 0) next
+      bin_size <- ceiling(n_cells / n_bins); sorted_vals <- sort(mod_vals)
+      for (b in 1:n_bins) {
+        start_idx <- (b - 1) * bin_size + 1; end_idx <- min(b * bin_size, n_cells); if (start_idx > n_cells) break
+        bin_data_list[[paste(i, j, b)]] <- data.frame(row_label = plot_order[j], bin = b, bin_score = mean(sorted_vals[start_idx:end_idx]),
+                                                      col_label = plot_order[i], stringsAsFactors = FALSE)
+      }
+    }
+  }
+  bin_df_all <- bind_rows(bin_data_list) %>% group_by(row_label) %>%
+    mutate(score_scaled = (bin_score - min(bin_score)) / (max(bin_score) - min(bin_score) + 1e-10)) %>% ungroup()
+  bin_df_all$fill_color  <- cluster_colors[bin_df_all$row_label]
+  bin_df_all$row_num     <- match(bin_df_all$row_label, plot_order)
+  bin_df_all$row_num_rev <- n_total - bin_df_all$row_num + 1
+  bin_df_all$col_label   <- factor(bin_df_all$col_label, levels = plot_order)
+  bin_df_all <- bin_df_all %>% mutate(cluster_num = as.numeric(col_label), x_pos = cluster_num - 0.4 + (bin - 1) / (n_bins - 1) * 0.8,
+                                      y_base = row_num_rev, y_top = row_num_rev + score_scaled * 0.85)
+  row_labels_ordered <- rev(plot_order)
+  y_colors_final <- cluster_colors[row_labels_ordered]
+
+  axis_label_size <- 18     # 1.5 x the earlier 12 pt
+  p <- ggplot(bin_df_all) +
+    geom_rect(data = clusters_df, aes(xmin = cluster_num - 0.48, xmax = cluster_num + 0.48, ymin = 0.5, ymax = n_total + 0.5, fill = stripe_color), alpha = 0.18, inherit.aes = FALSE) +
+    geom_ribbon(aes(x = x_pos, ymin = y_base, ymax = y_top, fill = fill_color, group = interaction(row_label, col_label)), alpha = 0.9) +
+    scale_fill_identity() +
+    geom_segment(data = bin_df_all %>% distinct(row_label, row_num_rev, cluster_num) %>% mutate(x_start = cluster_num - 0.45, x_end = cluster_num + 0.45),
+                 aes(x = x_start, xend = x_end, y = row_num_rev, yend = row_num_rev), color = "grey70", linewidth = 0.3) +
+    annotate("text", x = 1, y = n_total + 1.8, label = paste0("\u25A0 ", cap_label(obj1_name)), color = dataset_colors[obj1_name], fontface = "bold", size = 6, hjust = 0) +
+    annotate("text", x = 1, y = n_total + 1.2, label = paste0("\u25A0 ", cap_label(obj2_name)), color = dataset_colors[obj2_name], fontface = "bold", size = 6, hjust = 0) +
+    scale_x_continuous(breaks = 1:n_total, labels = plot_order, expand = c(0.02, 0.02)) +
+    scale_y_continuous(breaks = 1:n_total, labels = row_labels_ordered, expand = expansion(mult = c(0.01, 0.08))) +
+    theme_bw(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = axis_label_size, face = "bold"),
+          axis.text.y = element_text(size = axis_label_size, face = "bold", color = y_colors_final),
+          axis.title.x = element_blank(), panel.grid = element_blank(), legend.position = "none") +
+    ylab("Top-10-DEG module score (row = that cluster's own signature)") +
+    ggtitle(plot_title, subtitle = "Background stripe = source object; each row is one cluster's top-10-DEG module score, measured across every column-cluster")
+
+  out_w <- max(3200, n_total * 115 + 1100)     # px at 150 dpi
+  out_h <- max(3200, n_total * 100 + 1000)
+  png(paste0(pair_trackplot_module_dir9, out_filename), width = out_w, height = out_h, res = 150); print(p); dev.off()
+}
+make_pair_trackplot_module_score(rod_wk2_modscored_wk4, "rod_wk2", rod_wk4_modscored, "rod_wk4",
+  "pair_trackplot_module_score_rod_wk2_vs_rod_wk4.png", "Top-10-DEG module score per cluster: rod_wk2 vs rod_wk4")
+make_pair_trackplot_module_score(rod_wk2_modscored_sphere, "rod_wk2", sphere_wk2_modscored, "sphere_wk2",
+  "pair_trackplot_module_score_rod_wk2_vs_sphere_wk2.png", "Top-10-DEG module score per cluster: rod_wk2 vs sphere_wk2")
+cat("=== Updated Part 3 complete ===\n")
+
+
+################################################################################
+## UPDATED PART 4: Module_Scores_Extended (IMM / FIB axes)
+## Violins on common identities (lineage-restricted) + whole-object spatial (shared colour scale).
+## Scoring is done once per lineage / object and reused by Part 5.
+################################################################################
+imm_axes <- list(
+  IMM_Composition = list(
+    macrophage_core    = c("Cd68","Csf1r","Aif1","C1qa","C1qb","C1qc","Cd14","Itgam","Lyz2","Mpeg1","Fcgr1","Adgre1"),
+    monocyte_recruited = c("Csf1r","Cx3cr1","Ly6c2","Ccr2","Sell"),
+    resident_TLF       = c("Timd4","Lyve1","Folr2","Sepp1","F13a1","Pf4","Cd163"),
+    neutrophil         = c("S100a8","S100a9","Csf3r","Cxcr2","Ly6g"),
+    dendritic          = c("Flt3","Itgax","Zbtb46","Xcr1","Clec9a"),
+    mast               = c("Cpa3","Fcer1a","Ms4a2","Tpsab1","Tpsb2"),
+    t_cell             = c("Cd3e","Cd3g","Cd3d","Cd2","Cd5","Il7r","Cd4","Cd8a","Cd8b1"),
+    b_plasma           = c("Cd79a","Cd79b","Ms4a1","Cd19","Jchain","Xbp1","Prdm1")),
+  IMM_MacrophageState = list(
+    proinflam_classical    = c("Il1a","Il1b","Tnf","Il12a","Il12b","Il6","Ccl2","Nos2","Tlr2","Tlr4","Cd80","Cd86","Csf2","Ifng","Il1r1"),
+    nfkb_tnf_response      = c("Nfkbia","Nfkbiz","Tnfaip3","Ier3","Cxcl1","Cxcl3","Ccl20","Zfp36","Junb","Socs3","Icam1"),
+    inflammasome_ros       = c("Nlrp3","Pycard","Casp1","Il18","Gsdmd","P2rx7","Cybb","Ncf1","Ncf4","Cyba"),
+    prohealing_il4_13      = c("Mrc1","Cd163","Arg1","Il10","Igf1","Ccl17","Ccl22","Ccl24","Clec10a","Pdcd1lg2","Socs2","Irf4","Klf4","Retnla","Chil3"),
+    resolution_efferocyt   = c("Mertk","Axl","Gas6","Pros1","Timd4","Mfge8","Anxa1","Alox15","Hmox1","Cd36","Il10"),
+    spp1_trem2_fibrogenic  = c("Spp1","Trem2","Gpnmb","Cd9","Lgals3","Fabp5","Ctsb","Ctsd","Ctsl","Lpl","Apoe","Cd36","Cd63","Lipa"),
+    fbgc_fusion            = c("Dcstamp","Ocstamp","Atp6v0d2","Ctsk","Acp5","Mmp9","Itgb3","Cd44","Cd47","Cd9","Cd81","Nfatc1","Tnfrsf11a","Il4ra"),
+    phagocytic_lysosomal   = c("Lamp1","Lamp2","Ctss","Ctsz","Psap","Grn","Hexb","Npc2","Msr1","Marco","Fcgr2b","Fcgr3","C3ar1","C5ar1"),
+    mmp_degradation        = c("Mmp9","Mmp12","Mmp13","Mmp14","Mmp19","Adam8","Plau","Plaur","Ctsk"),
+    timp_brake             = c("Timp1","Timp2","Timp3"),
+    antigen_presentation   = c("Cd74","H2-Aa","H2-Ab1","H2-Eb1","H2-DMa","H2-DMb1","Ciita","Cd40","Cd80","Cd86"),
+    ifn_response           = c("Ifit1","Ifit2","Ifit3","Ifi44","Irf7","Oas1a","Rsad2","Bst2","Usp18","Stat1","Gbp2","Gbp5","Irf1"),
+    hypoxia_glycolysis     = c("Hif1a","Vegfa","Slc2a1","Pgk1","Hk2","Pfkfb3","Pdk1","Bnip3","Egln3","Adm","Car9","Ndrg1","Ankrd37","Mif"),
+    iron_heme_handling     = c("Hmox1","Slc40a1","Fth1","Cd163","Hp","Slc48a1"),
+    fibro_directed_ligands = c("Tgfb1","Pdgfb","Pdgfa","Igf1","Osm","Il1b","Il6","Tnf","Ccl2","Spp1","Areg","Wnt5a","Hbegf","Vegfa"),
+    proliferation          = c("Mki67","Top2a","Cenpf","Birc5","Stmn1","Cdk1","Pcna","Ube2c","Hmgb2")),
+  IMM_Lymphoid = list(
+    th1_core      = c("Ifng","Tbx21","Cxcr3","Il12rb2"),
+    type2_core    = c("Il4","Il13","Il5","Gata3","Il1rl1"),
+    type3_core    = c("Il17a","Il17f","Rorc","Il22","Il23r","Ccr6"),
+    treg          = c("Foxp3","Il2ra","Ctla4","Ikzf2","Tnfrsf18","Tigit"),
+    ifng_response = c("Cxcl9","Cxcl10","Gbp2","Gbp5","Irf1","Ciita","Stat1","Ido1","Cd274","Socs1"),
+    il17_response = c("Cxcl1","Il6","Lcn2","Nfkbiz","Ccl20","Csf3","Mmp3","Mmp13","Il1b","Cebpd","Zc3h12a")))
+fib_axes <- list(
+  FIB_Composition = list(
+    fibroblast_core         = c("Col1a1","Col1a2","Dcn","Pdgfra","Dpt","Thy1","Vim","Fap","Tgfb1","S100a4","Pdpn"),
+    mural_smc_control       = c("Myh11","Rgs5","Kcnj8","Abcc9","Notch3"),
+    endothelial             = c("Pecam1","Kdr","Cdh5","Cldn5","Emcn"),
+    adipocyte               = c("Pparg","Cebpa","Fabp4","Adipoq","Plin1","Lpl","Cidec","Lep"),
+    skeletal_muscle_control = c("Acta1","Ckm","Myh1","Myh2","Myh4","Tnnt3","Mylpf")),
+  FIB_Pool = list(
+    adventitial_stromal             = c("Pi16","Ccl11","Cd34","Cxcl1","Il33","Ly6a"),
+    fibro_adipogenic_progenitor     = c("Pi16","Dact2","Sfrp4","Wnt2","Sema3c","Tgfbr2"),
+    fibroinflammatory_progenitor    = c("Pi16","Dpp4","Ccl2","Fn1","Loxl2","Ly6c1","Tgfb2"),
+    interstitial_progenitor         = c("Pi16","Dpp4","Bmp7","Cd34","Ly6a","Thy1","Wnt2"),
+    multipotent_progenitor          = c("Pi16","Dpp4","Anxa3","Cd55","Dpt"),
+    stromal_mesenchymal_progenitor  = c("Aldh1a2","Hic1","Hmga2","Id1","Osr1","Snai1","Sox11","Tcf7l2"),
+    parenchymal_col15a1             = c("Col15a1","Col4a1","Col4a2","Hspg2"),
+    cthrc1_col11a1_activated_matrix_fib = c("Cthrc1","Lrrc15","Postn","Tnc","Col11a1","Fap","Itga11","Sfrp2")),
+  FIB_State = list(
+    myofibroblast                   = c("Cald1","Myl9","Tagln","Acta2"),
+    activated_matrix_fibroblast     = c("Col1a1","Col1a2","Col3a1","Col5a1","Col5a2","Col5a3","Col6a1","Col6a2","Col6a3","Col12a1","Col14a1","Col16a1"),
+    chemoattraction                 = c("C3","Ccl2","Cxcl1","Cxcl5","Icam1"),
+    acute_phase_response            = c("Dcn","Il6","Tnf","Sod2"),
+    ECM_degradation                 = c("Mmp3","Tfpi2","Timp1"),
+    ECM_organization                = c("Fn1","Jag1","Loxl3","Pcolce2","Tgfb1","Dcn"),
+    myofibroblastic_transformation  = c("Acta2","Itga11","Tagln"),
+    tgfb_response                   = c("Serpine1","Ctgf","Smad7","Smad6","Tgfbi"),
+    pdgf_wnt_growth                 = c("Pdgfra","Wnt5a","Axin2","Lef1","Pdgfrb","Pdgfa","Pdgfb","Pdgfc","Pdgfd"),
+    inflammatory_fibro              = c("Fap","Ccl19","Cxcl10","Il6","Il33","Cxcl12","Ccl21"),
+    senescence_sasp                 = c("Cdkn1a","Cdkn2a","Igfbp3","Cxcl1","Cxcl5","Cxcl12","Timp1","Mmp3","Gdf15","Il1a","Il6")))
+lineage_specs <- list(FIB = list(pattern = "FIB", axes = fib_axes), IMM = list(pattern = "IMM", axes = imm_axes))
+comparisons   <- list(c("rod_wk2", "rod_wk4"), c("rod_wk2", "sphere_wk2"))
+all_axes      <- c(imm_axes, fib_axes)
+lineage_of    <- setNames(c(rep("IMM", length(imm_axes)), rep("FIB", length(fib_axes))), names(all_axes))
+
+module_ext_dir9 <- paste0(updated9_path, "Module_Scores_Extended/")
+dir.create(module_ext_dir9, recursive = TRUE, showWarnings = FALSE)
+
+add_module_scores_named <- function(obj, module_list, prefix) {
+  for (mod_name in names(module_list)) {
+    genes_present <- intersect(module_list[[mod_name]], rownames(obj))
+    full_name <- paste0(prefix, "_", mod_name)
+    if (length(genes_present) == 0) { message("No genes present for ", full_name, " -- skipped"); next }
+    obj <- AddModuleScore(obj, features = list(genes_present), name = "TmpModScore")
+    obj[[full_name]] <- obj$TmpModScore1
+    obj$TmpModScore1 <- NULL
+  }
+  obj
+}
+report_missing_genes <- function(module_list, axis_group_name, all_object_genes) {
+  rows <- list()
+  for (mod_name in names(module_list)) {
+    missing_here <- setdiff(module_list[[mod_name]], all_object_genes)
+    if (length(missing_here) > 0) rows[[mod_name]] <- data.frame(axis_group = axis_group_name, module = mod_name, gene = missing_here, stringsAsFactors = FALSE)
+  }
+  if (length(rows) > 0) bind_rows(rows) else data.frame(axis_group = character(0), module = character(0), gene = character(0))
+}
+
+# ---- Score once: lineage-restricted combined object per lineage; full individual objects ----
+score_lineage <- function(lineage_pattern, axes) {
+  lin <- subset(combined, subset = grepl(lineage_pattern, cell_identity))
+  for (grp in names(axes)) lin <- add_module_scores_named(lin, axes[[grp]], grp)
+  mod_cols <- intersect(unlist(lapply(names(axes), function(grp) paste0(grp, "_", names(axes[[grp]])))), colnames(lin@meta.data))
+  df <- lin@meta.data[, c("dataset", "cell_identity", "implant_region", mod_cols)]
+  df$dataset <- as.character(df$dataset); df$cell_identity <- as.character(df$cell_identity)
+  list(obj = lin, df = df, mod_cols = mod_cols)
+}
+lin_scored <- lapply(lineage_specs, function(sp) score_lineage(sp$pattern, sp$axes))
+full_scored <- lapply(list(rod_wk2 = rod_wk2, rod_wk4 = rod_wk4_04, sphere_wk2 = sphere_wk2), function(o) {
+  for (grp in names(all_axes)) o <- add_module_scores_named(o, all_axes[[grp]], grp)
+  o
+})
+
+run_axis_violin_common <- function(combined_lineage_obj, modules, module_labels, conditions, comparison_tag, out_dir) {
+  sub_obj <- subset(combined_lineage_obj, subset = dataset %in% conditions)
+  sub_obj$dataset <- factor(sub_obj$dataset, levels = conditions)
+  shared_identities <- intersect(unique(sub_obj$cell_identity[sub_obj$dataset == conditions[1]]), unique(sub_obj$cell_identity[sub_obj$dataset == conditions[2]]))
+  if (length(shared_identities) == 0) { message("No shared identities for ", comparison_tag, " -- skipped"); return(invisible(NULL)) }
+  sub_obj <- subset(sub_obj, subset = cell_identity %in% shared_identities)
+  identity_levels <- intersect(master_identity_order, shared_identities)
+  sub_obj$cell_identity <- factor(sub_obj$cell_identity, levels = identity_levels)
+  modules_present <- intersect(modules, colnames(sub_obj@meta.data))
+  if (length(modules_present) == 0) { message("No scored modules present for ", comparison_tag); return(invisible(NULL)) }
+  plot_df <- FetchData(sub_obj, vars = c("cell_identity", "dataset", modules_present))
+  plot_df_long <- plot_df %>%
+    pivot_longer(cols = all_of(modules_present), names_to = "module", values_to = "score") %>%
+    mutate(module_label = module_labels[module], dataset = factor(dataset, levels = conditions), cell_identity = factor(cell_identity, levels = identity_levels))
+  colors_use <- dataset_colors[conditions]
+  axis_th <- theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face = "bold"), axis.text.y = element_text(size = 12, face = "bold"))
+  for (mod in modules_present) {
+    df_mod <- plot_df_long %>% filter(module == mod, !is.na(score))
+    stat_df <- tryCatch({
+      df_mod %>% group_by(cell_identity) %>% filter(n_distinct(dataset) == 2) %>%
+        wilcox_test(score ~ dataset) %>% add_significance("p") %>% add_xy_position(x = "cell_identity", dodge = 0.85)
+    }, error = function(e) data.frame())
+    p <- ggplot(df_mod, aes(x = cell_identity, y = score, fill = dataset)) +
+      geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+      geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+      scale_fill_manual(values = colors_use) + theme_classic() + axis_th + theme(plot.title = element_text(size = 16, face = "bold")) +
+      labs(title = paste0(module_labels[mod], ": ", conditions[1], " vs ", conditions[2], " (shared cell identities)"), x = NULL, y = "Module score", fill = "Object")
+    if (nrow(stat_df) > 0) p <- p + stat_pvalue_manual(stat_df, label = "p.signif", hide.ns = TRUE, tip.length = 0.01)
+    ggsave(paste0(out_dir, "Violin_Boxplot_", mod, "_", comparison_tag, ".jpeg"), p, width = 11, height = 7, dpi = 300)
+    ggsave(paste0(out_dir, "Violin_Boxplot_", mod, "_", comparison_tag, ".pdf"),  p, width = 11, height = 7)
+  }
+  n_mod <- length(modules_present)
+  p_all <- ggplot(plot_df_long, aes(x = cell_identity, y = score, fill = dataset)) +
+    geom_violin(position = position_dodge(width = 0.85), trim = TRUE, alpha = 0.75, scale = "width") +
+    geom_boxplot(position = position_dodge(width = 0.85), width = 0.15, outlier.shape = NA, alpha = 0.9) +
+    facet_wrap(~ module_label, scales = "free_y", ncol = 3) +
+    scale_fill_manual(values = colors_use) + theme_classic() + axis_th +
+    theme(strip.text = element_text(size = 12, face = "bold"), plot.title = element_text(size = 17, face = "bold")) +
+    labs(title = paste0("All modules: ", conditions[1], " vs ", conditions[2]), x = NULL, y = "Module score", fill = "Object")
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_", comparison_tag, ".jpeg"), p_all, width = 6 * min(3, n_mod), height = 5 * ceiling(n_mod / 3), dpi = 300)
+  ggsave(paste0(out_dir, "Violin_Boxplot_ALL_", comparison_tag, ".pdf"),  p_all, width = 6 * min(3, n_mod), height = 5 * ceiling(n_mod / 3))
+}
+
+make_axis_spatial_shared_scale <- function(obj1, obj1_name, pt1, sq1, obj2, obj2_name, pt2, sq2, mod_col, mod_label, out_dir) {
+  if (!(mod_col %in% colnames(obj1@meta.data)) || !(mod_col %in% colnames(obj2@meta.data))) return(invisible(NULL))
+  shared_range <- range(c(FetchData(obj1, vars = mod_col)[, 1], FetchData(obj2, vars = mod_col)[, 1]), na.rm = TRUE)
+  mk <- function(obj, nm, pt, sq) {
+    p <- SpatialFeaturePlot(obj, features = mod_col, pt.size.factor = pt) +
+      scale_fill_gradientn(colors = spatial_colors_100, limits = shared_range, name = mod_label) +
+      ggtitle(paste0(mod_label, " (", nm, ")")) +
+      theme(plot.title = element_text(size = 13, face = "bold"), legend.title = element_text(face = "bold"), legend.text = element_text(face = "bold"))
+    if (sq) p <- p + theme(aspect.ratio = 1)
+    p
+  }
+  p_spatial <- mk(obj1, obj1_name, pt1, sq1) + mk(obj2, obj2_name, pt2, sq2) +
+    plot_annotation(title = paste0(mod_label, " (shared color scale): ", obj1_name, " vs ", obj2_name))
+  ggsave(paste0(out_dir, "spatial_", mod_col, "_", obj1_name, "_vs_", obj2_name, ".png"), p_spatial, width = 10, height = 5, dpi = 300)
+}
+
+all_object_genes <- Reduce(union, list(rownames(rod_wk2), rownames(rod_wk4_04), rownames(sphere_wk2)))
+missing_reports <- list()
+for (grp in names(all_axes)) {
+  module_list <- all_axes[[grp]]; lin <- lineage_of[[grp]]
+  module_names_this  <- paste0(grp, "_", names(module_list))
+  module_labels_this <- setNames(cap_label(names(module_list)), module_names_this)
+  violin_dir <- paste0(module_ext_dir9, grp, "/Violin_Boxplot/"); spatial_dir <- paste0(module_ext_dir9, grp, "/Spatial/")
+  dir.create(violin_dir, recursive = TRUE, showWarnings = FALSE); dir.create(spatial_dir, recursive = TRUE, showWarnings = FALSE)
+  missing_reports[[grp]] <- report_missing_genes(module_list, grp, all_object_genes)
+
+  run_axis_violin_common(lin_scored[[lin]]$obj, module_names_this, module_labels_this, c("rod_wk2", "rod_wk4"),    "rod_wk2_vs_rod_wk4",    violin_dir)
+  run_axis_violin_common(lin_scored[[lin]]$obj, module_names_this, module_labels_this, c("rod_wk2", "sphere_wk2"), "rod_wk2_vs_sphere_wk2", violin_dir)
+  for (mod_name in module_names_this) {      # spatial: WHOLE objects, shared colour scale
+    make_axis_spatial_shared_scale(full_scored$rod_wk2, "rod_wk2", rod_pt_size, FALSE, full_scored$rod_wk4,    "rod_wk4",    rod_pt_size,    FALSE, mod_name, module_labels_this[mod_name], spatial_dir)
+    make_axis_spatial_shared_scale(full_scored$rod_wk2, "rod_wk2", rod_pt_size, FALSE, full_scored$sphere_wk2, "sphere_wk2", sphere_pt_size, TRUE,  mod_name, module_labels_this[mod_name], spatial_dir)
+  }
+  cat("=== Axis group", grp, "complete ===\n")
+}
+missing_genes_all <- bind_rows(missing_reports)
+if (nrow(missing_genes_all) > 0) {
+  message("=== Genes not found in ANY of rod_wk2 / rod_wk4 / sphere_wk2 ===")
+  print(missing_genes_all)
+  write.csv(missing_genes_all, paste0(module_ext_dir9, "genes_not_found_in_any_object.csv"), row.names = FALSE)
+} else message("All genes across all modules were found in at least one object.")
+cat("=== Updated Part 4 complete ===\n")
+
+
+################################################################################
+## UPDATED PART 5: Axis dumbbell plots (median / mean, significant-only / all axes) + Excel reference
+## Reuses lin_scored from Part 4 (no re-scoring).
+## Difference = compared object minus rod_wk2; implant-region spots only; identities shared by both objects;
+## Wilcoxon rank-sum per module x identity, BH-adjusted within comparison x identity.
+## Sets: Significant_PureClusters_Median, Significant_PureClusters_Mean, All_Axes_Median
+################################################################################
+dumbbell_dir9      <- paste0(module_ext_dir9, "Dumbbell_Plots_Final/")
+dir.create(dumbbell_dir9, recursive = TRUE, showWarnings = FALSE)
+dumbbell_min_spots <- 20      # min implant spots per object for an identity to be tested
+unchanged_cutoff   <- 0.03    # |median (or mean) difference| below this = "unchanged"
+sig_cutoff         <- 0.05    # on BH-adjusted p
+all_axes_pure_only <- TRUE    # FALSE = also include mixed identities (those with "&") in the all-axes folder
+
+module_display_labels <- c(
+  FIB_Composition_fibroblast_core = "Fibroblast core", FIB_Composition_mural_smc_control = "Mural / SMC",
+  FIB_Composition_endothelial = "Endothelial", FIB_Composition_adipocyte = "Adipocyte", FIB_Composition_skeletal_muscle_control = "Skeletal muscle",
+  FIB_Pool_adventitial_stromal = "Adventitial stromal", FIB_Pool_fibro_adipogenic_progenitor = "Fibro-adipogenic progenitor",
+  FIB_Pool_fibroinflammatory_progenitor = "Fibro-inflammatory progenitor", FIB_Pool_interstitial_progenitor = "Interstitial progenitor",
+  FIB_Pool_multipotent_progenitor = "Multipotent progenitor", FIB_Pool_stromal_mesenchymal_progenitor = "Stromal mesenchymal progenitor",
+  FIB_Pool_parenchymal_col15a1 = "Parenchymal Col15a1", FIB_Pool_cthrc1_col11a1_activated_matrix_fib = "Cthrc1 / Col11a1 activated matrix",
+  FIB_State_myofibroblast = "Myofibroblast", FIB_State_activated_matrix_fibroblast = "Activated matrix (collagens)",
+  FIB_State_chemoattraction = "Chemoattraction", FIB_State_acute_phase_response = "Acute-phase response",
+  FIB_State_ECM_degradation = "ECM degradation", FIB_State_ECM_organization = "ECM organisation",
+  FIB_State_myofibroblastic_transformation = "Myofibroblastic transformation", FIB_State_tgfb_response = "TGF-\u03b2 response",
+  FIB_State_pdgf_wnt_growth = "PDGF / Wnt growth", FIB_State_inflammatory_fibro = "Inflammatory fibroblast", FIB_State_senescence_sasp = "Senescence / SASP",
+  IMM_Composition_macrophage_core = "Macrophage core", IMM_Composition_monocyte_recruited = "Recruited monocyte",
+  IMM_Composition_resident_TLF = "Resident (TLF) macrophage", IMM_Composition_neutrophil = "Neutrophil",
+  IMM_Composition_dendritic = "Dendritic", IMM_Composition_mast = "Mast", IMM_Composition_t_cell = "T cell", IMM_Composition_b_plasma = "B / plasma",
+  IMM_MacrophageState_proinflam_classical = "Pro-inflammatory (classical)", IMM_MacrophageState_nfkb_tnf_response = "NF-\u03baB / TNF response",
+  IMM_MacrophageState_inflammasome_ros = "Inflammasome / ROS", IMM_MacrophageState_prohealing_il4_13 = "Pro-healing (IL-4 / IL-13)",
+  IMM_MacrophageState_resolution_efferocyt = "Resolution / efferocytosis", IMM_MacrophageState_spp1_trem2_fibrogenic = "Spp1 / Trem2 fibrogenic",
+  IMM_MacrophageState_fbgc_fusion = "FBGC fusion", IMM_MacrophageState_phagocytic_lysosomal = "Phagocytic / lysosomal",
+  IMM_MacrophageState_mmp_degradation = "MMP degradation", IMM_MacrophageState_timp_brake = "TIMP brake",
+  IMM_MacrophageState_antigen_presentation = "Antigen presentation", IMM_MacrophageState_ifn_response = "IFN response",
+  IMM_MacrophageState_hypoxia_glycolysis = "Hypoxia / glycolysis", IMM_MacrophageState_iron_heme_handling = "Iron / heme handling",
+  IMM_MacrophageState_fibro_directed_ligands = "Fibroblast-directed ligands", IMM_MacrophageState_proliferation = "Proliferation",
+  IMM_Lymphoid_th1_core = "Th1 core", IMM_Lymphoid_type2_core = "Type 2 core", IMM_Lymphoid_type3_core = "Type 3 core",
+  IMM_Lymphoid_treg = "Treg", IMM_Lymphoid_ifng_response = "IFN-\u03b3 response", IMM_Lymphoid_il17_response = "IL-17 response")
+section_titles <- c(FIB_Composition = "Composition controls", FIB_Pool = "Fibroblast pools", FIB_State = "Fibroblast states",
+                    IMM_Composition = "Composition", IMM_MacrophageState = "Macrophage states", IMM_Lymphoid = "Lymphoid")
+get_module_label <- function(module, module_short) {
+  lbl <- unname(module_display_labels[module]); fb <- is.na(lbl); lbl[fb] <- cap_label(module_short[fb]); lbl
+}
+status_from <- function(diff, significant, prob_sup) {
+  dir <- ifelse(abs(diff) < unchanged_cutoff, sign(prob_sup - 0.5), sign(diff))
+  ifelse(!significant, "ns", ifelse(dir > 0, "higher", ifelse(dir < 0, "lower", "ns")))
+}
+
+compute_axis_stats <- function(score_df, mod_cols, axes, ref, other, lineage_tag) {
+  d <- score_df[score_df$implant_region == "Implant" & score_df$dataset %in% c(ref, other), ]
+  n_tab <- table(d$dataset, d$cell_identity)
+  ok_ids <- colnames(n_tab)[n_tab[ref, ] >= dumbbell_min_spots & n_tab[other, ] >= dumbbell_min_spots]
+  shared <- intersect(master_identity_order, ok_ids)
+  if (length(shared) == 0) { message("No shared implant identities for ", lineage_tag, ": ", ref, " vs ", other); return(NULL) }
+  map_df <- bind_rows(lapply(names(axes), function(g) data.frame(axis_group = g, module = paste0(g, "_", names(axes[[g]])), module_short = names(axes[[g]]), stringsAsFactors = FALSE)))
+  map_df <- map_df[map_df$module %in% mod_cols, ]
+  rows <- vector("list", length(shared) * nrow(map_df)); k <- 0
+  for (id in shared) {
+    d_id <- d[d$cell_identity == id, ]
+    for (m in map_df$module) {
+      x_ref <- d_id[[m]][d_id$dataset == ref];   x_ref <- x_ref[!is.na(x_ref)]
+      x_oth <- d_id[[m]][d_id$dataset == other]; x_oth <- x_oth[!is.na(x_oth)]
+      wt <- suppressWarnings(wilcox.test(x_oth, x_ref, exact = FALSE))
+      k <- k + 1
+      rows[[k]] <- data.frame(identity = id, module = m, n_ref = length(x_ref), n_other = length(x_oth),
+                              median_ref = median(x_ref), median_other = median(x_oth), mean_ref = mean(x_ref), mean_other = mean(x_oth),
+                              W = unname(wt$statistic), p_raw = wt$p.value, stringsAsFactors = FALSE)
+    }
+  }
+  bind_rows(rows) %>% left_join(map_df, by = "module") %>%
+    group_by(identity) %>% mutate(p_adj_BH = p.adjust(p_raw, method = "BH")) %>% ungroup() %>%
+    mutate(lineage = lineage_tag, reference_object = ref, compared_object = other, comparison = paste0(other, "_minus_", ref),
+           identity_type = ifelse(grepl("&", identity), "mixed", "pure"), module_label = get_module_label(module, module_short),
+           median_diff = median_other - median_ref, mean_diff = mean_other - mean_ref, prob_superiority = W / (n_other * n_ref),
+           significant = !is.na(p_adj_BH) & p_adj_BH < sig_cutoff,
+           stars = case_when(is.na(p_adj_BH) ~ "ns", p_adj_BH < 1e-4 ~ "****", p_adj_BH < 1e-3 ~ "***", p_adj_BH < 1e-2 ~ "**", p_adj_BH < sig_cutoff ~ "*", TRUE ~ "ns"),
+           status_median = status_from(median_diff, significant, prob_superiority),
+           status_mean   = status_from(mean_diff,   significant, prob_superiority),
+           unchanged_but_significant_median = significant & abs(median_diff) < unchanged_cutoff,
+           unchanged_but_significant_mean   = significant & abs(mean_diff)   < unchanged_cutoff) %>%
+    select(lineage, comparison, reference_object, compared_object, identity, identity_type, axis_group, module, module_label,
+           n_ref, n_other, median_ref, median_other, median_diff, mean_ref, mean_other, mean_diff, W, prob_superiority, p_raw, p_adj_BH,
+           stars, significant, status_median, status_mean, unchanged_but_significant_median, unchanged_but_significant_mean)
+}
+
+plot_axis_dumbbell <- function(st, axes, ref, other, out_prefix, stat = c("median", "mean")) {
+  stat <- match.arg(stat)
+  st <- st %>% mutate(plot_diff = if (stat == "median") median_diff else mean_diff,
+                      status = status_from(plot_diff, significant, prob_superiority),
+                      unch_sig = significant & abs(plot_diff) < unchanged_cutoff)
+  ids <- intersect(master_identity_order, unique(st$identity)); n_id <- length(ids)
+  shape_vals <- setNames(c(21, 23, 24, 22, 25)[seq_len(n_id)], ids)
+  other_lab <- gsub("_", " ", other); ref_lab <- gsub("_", " ", ref)
+  ord <- st %>% group_by(axis_group, module, module_label) %>% summarise(mean_val = mean(plot_diff), .groups = "drop")
+  lay_list <- list(); cursor <- 0
+  for (g in names(axes)) {
+    og <- ord[ord$axis_group == g, ]; og <- og[order(-og$mean_val), ]
+    if (nrow(og) == 0) next
+    if (cursor > 0) cursor <- cursor + 0.6
+    sec <- if (g %in% names(section_titles)) unname(section_titles[g]) else cap_label(g)
+    lay_list[[length(lay_list) + 1]] <- data.frame(kind = "header", module = NA_character_, label = sec, y = -cursor, idx = 0, stringsAsFactors = FALSE)
+    cursor <- cursor + 1
+    for (i in seq_len(nrow(og))) {
+      lay_list[[length(lay_list) + 1]] <- data.frame(kind = "module", module = og$module[i], label = og$module_label[i], y = -cursor, idx = i, stringsAsFactors = FALSE)
+      cursor <- cursor + 1
+    }
+  }
+  lay <- bind_rows(lay_list); mods <- lay[lay$kind == "module", ]; hdrs <- lay[lay$kind == "header", ]
+  row_h <- 0.30; lab_w <- max(nchar(lay$label)) * 0.09 + 0.3; data_w <- 5.2; gap <- 0.3; star_w <- 0.65
+  x0 <- lab_w + gap
+  xr <- range(c(0, st$plot_diff)); xr <- xr + c(-1, 1) * max(0.12 * diff(xr), 0.02)
+  scl <- data_w / diff(xr); xmap <- function(v) x0 + (v - xr[1]) * scl
+  brks <- pretty(xr, n = 5); brks <- brks[brks >= xr[1] & brks <= xr[2]]
+  digits <- if (all(abs(brks - round(brks, 1)) < 1e-9)) 1 else 2
+  tick_lab <- ifelse(brks == 0, formatC(0, format = "f", digits = digits), sub("-", "\u2212", sprintf(paste0("%+.", digits, "f"), brks)))
+  star_x0 <- x0 + data_w + 0.45; total_w <- star_x0 + n_id * star_w + 0.1
+  y_top <- 0.6; y_grid_bot <- min(lay$y) - 0.5; y_bot <- y_grid_bot - 2.4
+  pts <- st %>% inner_join(mods[, c("module", "y", "idx")], by = "module") %>%
+    mutate(x = xmap(plot_diff), identity = factor(identity, levels = ids), status = factor(status, levels = c("higher", "lower", "ns")),
+           star_x = star_x0 + (as.integer(identity) - 0.5) * star_w)
+  ann <- pts %>% filter(unch_sig) %>%
+    mutate(txt = if (n_id == 1) paste0(stat, " unchanged; distribution ", ifelse(status == "higher", "higher", "lower")) else paste0(as.character(identity), " ", stat, " unchanged")) %>%
+    group_by(y) %>% summarise(txt = paste(txt, collapse = "; "), .groups = "drop")
+  axis_title <- paste0("Difference in ", stat, " module score (", other_lab, " minus ", ref_lab, "), ", paste(ids, collapse = " / "), " spots")
+  p <- ggplot() +
+    geom_rect(data = mods[mods$idx %% 2 == 1, ], aes(xmin = 0, xmax = total_w, ymin = y - 0.5, ymax = y + 0.5), fill = "#F2F2F7") +
+    geom_segment(data = data.frame(b = brks), aes(x = xmap(b), xend = xmap(b), y = y_grid_bot, yend = 0.4), colour = "#E1E1E8", linewidth = 0.4) +
+    annotate("segment", x = xmap(0), xend = xmap(0), y = y_grid_bot, yend = 0.4, colour = "#6B6B7B", linewidth = 0.7) +
+    geom_segment(data = pts, aes(x = xmap(0), xend = x, y = y, yend = y), colour = "#CFCFDB", linewidth = 0.7) +
+    geom_point(data = pts, aes(x = x, y = y, fill = status, shape = identity), size = 4.4, colour = "white", stroke = 0.5) +
+    geom_text(data = hdrs, aes(x = lab_w, y = y, label = label), hjust = 1, fontface = "bold", size = 4.8) +    # section headers right-aligned with module names
+    geom_text(data = mods, aes(x = lab_w, y = y, label = label), hjust = 1, size = 4.3) +
+    geom_text(data = pts[pts$stars != "ns", ], aes(x = star_x, y = y, label = stars), fontface = "bold", size = 5, vjust = 0.3) +
+    geom_text(data = pts[pts$stars == "ns", ], aes(x = star_x, y = y, label = stars), colour = "grey55", size = 3.8) +
+    geom_text(data = data.frame(x = xmap(brks), y = y_grid_bot - 0.7, label = tick_lab), aes(x = x, y = y, label = label), size = 4.2, colour = "grey30") +
+    annotate("text", x = xmap(mean(xr)), y = y_grid_bot - 1.7, label = axis_title, size = 4.2, colour = "grey30") +
+    scale_fill_manual(values = c(higher = "#D64541", lower = "#2F5DA8", ns = "#BCBCC8"), breaks = c("higher", "lower", "ns"),
+                      labels = c(paste0("Higher in ", other_lab), paste0("Lower in ", other_lab), "Not significant"), name = NULL, drop = FALSE) +
+    scale_shape_manual(values = shape_vals, name = NULL) +
+    scale_x_continuous(limits = c(0, total_w), expand = c(0, 0)) + scale_y_continuous(limits = c(y_bot, y_top), expand = c(0, 0)) +
+    guides(fill = guide_legend(order = 1, override.aes = list(shape = 21, size = 4.4)),
+           shape = if (n_id > 1) guide_legend(order = 2, override.aes = list(fill = "grey70", size = 4.4)) else "none") +
+    theme_void(base_size = 12) +
+    theme(legend.position = "top", legend.justification = "left", legend.text = element_text(size = 12), plot.margin = margin(8, 8, 8, 8))
+  if (n_id > 1) p <- p + geom_text(data = data.frame(x = star_x0 + (seq_len(n_id) - 0.5) * star_w, y = hdrs$y[1], label = ids), aes(x = x, y = y, label = label), fontface = "bold", size = 4.6)
+  if (nrow(ann) > 0) p <- p + geom_text(data = ann, aes(x = xmap(0) + 0.3, y = y, label = txt), hjust = 0, fontface = "italic", colour = "grey35", size = 3.5)
+  w <- total_w + 0.4; h <- (y_top - y_bot) * row_h + 1.0
+  png(paste0(out_prefix, ".png"), width = w * 300, height = h * 300, res = 300, type = "cairo", bg = "white"); print(p); dev.off()
+  cairo_pdf(paste0(out_prefix, ".pdf"), width = w, height = h); print(p); dev.off()
+}
+
+all_stats <- list()
+for (lin in names(lineage_specs)) for (cmp in comparisons) {
+  st <- compute_axis_stats(lin_scored[[lin]]$df, lin_scored[[lin]]$mod_cols, lineage_specs[[lin]]$axes, cmp[1], cmp[2], lin)
+  if (!is.null(st)) all_stats[[paste0(lin, "_", cmp[1], "_vs_", cmp[2])]] <- st
+}
+plot_sets <- list(
+  list(folder = "Significant_PureClusters_Median", stat = "median", sig_only = TRUE,  pure_only = TRUE),
+  list(folder = "Significant_PureClusters_Mean",   stat = "mean",   sig_only = TRUE,  pure_only = TRUE),
+  list(folder = "All_Axes_Median",                 stat = "median", sig_only = FALSE, pure_only = all_axes_pure_only))
+for (ps in plot_sets) dir.create(paste0(dumbbell_dir9, ps$folder, "/"), recursive = TRUE, showWarnings = FALSE)
+for (ps in plot_sets) for (tag in names(all_stats)) {
+  st0 <- all_stats[[tag]]
+  if (ps$pure_only) st0 <- st0[st0$identity_type == "pure", ]
+  if (nrow(st0) == 0) { message("[", ps$folder, "] no pure shared identities for ", tag, " -- skipped"); next }
+  if (ps$sig_only) st0 <- st0[st0$module %in% unique(st0$module[st0$significant]), ]
+  if (nrow(st0) == 0) { message("[", ps$folder, "] no significant modules for ", tag, " -- skipped"); next }
+  lin <- st0$lineage[1]; ref <- st0$reference_object[1]; other <- st0$compared_object[1]
+  plot_axis_dumbbell(st0, lineage_specs[[lin]]$axes, ref, other, paste0(dumbbell_dir9, ps$folder, "/Dumbbell_", ps$stat, "_", tag), ps$stat)
+  cat("[", ps$folder, "]", tag, "| identities:", paste(unique(st0$identity), collapse = ", "), "| modules plotted:", length(unique(st0$module)), "\n")
+}
+
+dumbbell_overview <- data.frame(
+  item = c("Scores", "Spots", "Comparison", "Test", "Multiple testing", "Table content", "Min spots", "Unchanged cutoff"),
+  description = c("AddModuleScore on the lineage-restricted combined object (same scores as the violin/boxplot plots).",
+                  "Implant-region spots only; only cell identities present in both objects of the comparison.",
+                  "compared_object minus reference_object (reference is rod_wk2).",
+                  "Two-sided Wilcoxon rank-sum per module and identity.",
+                  "Benjamini-Hochberg across all modules of the lineage within each comparison x identity; stars and colours use p_adj_BH < 0.05.",
+                  "Complete reference table: every module tested, significant or not (filter on 'significant').",
+                  paste0("Identities need at least ", dumbbell_min_spots, " implant spots in both objects."),
+                  paste0("A significant module counts as 'unchanged' when the plotted difference is below ", unchanged_cutoff, ".")),
+  stringsAsFactors = FALSE)
+excel_sheets <- c(all_stats, list(All_results = bind_rows(all_stats)))
+write_workbook_with_readme(paste0(dumbbell_dir9, "Axis_scoring_stats_all_comparisons.xlsx"), excel_sheets, col_dict, dumbbell_overview)
+cat("=== Updated Part 5 complete -- Final_Analysis_9 Updated batch finished ===\n")
